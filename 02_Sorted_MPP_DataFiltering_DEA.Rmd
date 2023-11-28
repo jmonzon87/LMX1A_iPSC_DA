@@ -1,0 +1,1947 @@
+---
+title: "Filtering dataset and DEA iPSC-DA BFP sorting and MPP treatment"
+author: "J Monzón Sandoval"
+date: 'Last update: `r date()`'
+output: 
+  html_document:
+    theme: lumen
+    toc: yes
+    number_sections: true
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+---
+
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE)
+
+library(Seurat)
+library(scater)
+#library(ouija)
+
+library(stringr)
+library(ggplot2)
+library(ggsci)
+library(ggvenn)
+library(ggnewscale)
+library(cowplot)
+library(MetBrewer)
+library(RColorBrewer)
+
+library(corrgram)
+library(venn)
+library(reshape)
+library(pheatmap)
+library(ComplexHeatmap)
+
+library(clusterProfiler)
+
+```
+
+```{r GeneExpression}
+
+# Gene_ID	Gene_Name	Gene_Biotype	Gene_Length # Columns in gene info tab 
+# ensembl annotations release 99
+gene_info <- read.table("./05_Analyzer/NS_basal_S15_L1/gene_info.csv", sep = ",", header = TRUE, stringsAsFactors = FALSE)
+
+# All data matrices
+fn <- list.files(path = "./05_Analyzer", 
+                 pattern = "_genematrix.csv", 
+                 recursive = TRUE, full.names = TRUE)
+fn <- fn[str_detect(string = fn, pattern = "_incl_introns_", 
+                    negate = TRUE)] # change to FALSE to include introns
+
+# Need to combine counts from the different samples
+t1 <- read.table(file = fn[1], sep = ",", header = TRUE, row.names = 1)
+
+for (i in c(2:length(fn))){
+  ti <- read.table(file = fn[i], sep = ",", header = TRUE, row.names = 1)
+  t1 <- cbind(t1, ti)
+}
+
+ged <- t1
+rm(i, t1, ti, fn)
+
+ged <- as.matrix(ged)
+
+```
+
+```{r phenoPart1}
+
+# Mappa Stats
+pheno <- read.table("./06_Pheno/Pheno_MappaStats.txt", sep = "\t", stringsAsFactors = FALSE, header = TRUE)
+
+pheno <- data.frame(pheno[, 1:12], 
+                    Percent_Mapped = pheno$Mapped_Reads * 100 / pheno$Barcoded_Reads, 
+                    Percent_Multimapped_Reads = pheno$Multimapped_Reads * 100 / pheno$Mapped_Reads,
+                    Percent_Uniquely_Mapped = pheno$Uniquely_Mapped_Reads * 100 / pheno$Mapped_Reads,
+                    Percent_Exon_Reads = pheno$Exon_Reads * 100 / pheno$Uniquely_Mapped,
+                    Percent_Ambiguous_Exon_Reads = pheno$Ambiguous_Exon_Reads * 100 / pheno$Uniquely_Mapped,
+                    Percent_Intron_Reads = pheno$Intron_Reads * 100 / pheno$Uniquely_Mapped,
+                    Percent_Ambiguous_Intron_Reads = pheno$Ambiguous_Intron_Reads * 100 / pheno$Uniquely_Mapped,
+                    Percent_Intergenic_Reads = pheno$Intergenic_Reads * 100 / pheno$Uniquely_Mapped,
+                    Percent_Mitochondrial_Reads = pheno$Mitochondrial_Reads * 100 / pheno$Uniquely_Mapped,
+                    Percent_Ribosomal_Reads = pheno$Ribosomal_Reads * 100 / pheno$Uniquely_Mapped,
+                    pheno[, 13:ncol(pheno)])
+
+# Set up levels 
+pheno$InternalControl <- factor(x = pheno$InternalControl, levels = c("PosCtrl", "NegCtrl", "no"))
+pheno$Status <- factor(x = pheno$Status, levels = c("Sorted", "NS", "PosCtrl", "NegCtrl"))
+pheno$BFP <- factor(x = pheno$BFP, levels = c("NS", "negative", "positive",  "PosCtrl", "NegCtrl"))
+pheno$Treatment <- factor(x = pheno$Treatment, levels = c("basal", "MPP", "PosCtrl", "NegCtrl"))
+pheno$Dose <- factor(x = pheno$Dose, levels = c("0mM", "1mM", "PosCtrl", "NegCtrl"))
+pheno$Time <- factor(x = pheno$Time, levels = c("0h", "1h", "6h", "12h", "24h", "PosCtrl", "NegCtrl"))
+pheno$Group <- factor(x = pheno$Group, levels =  c("BFPplus_basal_0h", "BFPplus_MPP_1h", "BFPplus_MPP_6h", 
+                                                   "BFPplus_MPP_12h", "BFPplus_MPP_24h", "BFPminus_basal_0h", 
+                                                   "BFPminus_MPP_24h", "NS_basal_0h", "NS_MPP_24h", 
+                                                   "PosCtrl", "NegCtrl"))
+pheno$SampleDescription <- factor(x = pheno$SampleDescription, 
+                                  levels =  c("Sorted BFP+ basal", "Sorted BFP+ 1mM MPP+ 1h", "Sorted BFP+ 1mM MPP+ 6h",
+                                              "Sorted BFP+ 1mM MPP+ 12h", "Sorted BFP+ 1mM MPP+ 24h", "Sorted BFP- basal",
+                                              "Sorted BFP- 1mM MPP+ 24h", "NS basal", "NS 1mM MPP+ 24h",
+                                              "Positive control", "Negative control"))
+
+
+
+```
+
+```{r PhenoPart2}
+
+# Feature annotation and counts only for Protein Coding genes
+fd <- gene_info[which(gene_info$Gene_Biotype == "protein_coding"), ]
+rownames(fd) <- fd$Gene_ID
+pc_genes <- rownames(fd)
+
+# Select protein coding genes and order of gene expression data to pheno
+pc_counts <- ged[pc_genes, pheno$Barcode]
+
+# Add row names to pheno to create sce object
+pheno_sce <- pheno
+rownames(pheno_sce) <- pheno_sce$Barcode
+
+# single cell object
+sce <- SingleCellExperiment(assays = list(counts = pc_counts),
+                            colData = pheno_sce, rowData = fd)
+rm(pheno_sce)
+
+
+# Calculate QC for cells
+QCcells <- perCellQCMetrics(sce, percent_top = c(10, 20, 50, 100)) 
+
+# Normalize data 
+cpm(sce) <- calculateCPM(sce)
+tpm(sce) <- calculateTPM(sce, lengths = rowData(sce)[, "Gene_Length"])
+
+# Add QC for cells and number of genes detected to colData
+genes_detected_1TPM <- apply(X = tpm(sce), MARGIN = 2, FUN = function(x) length(which(x >= 1)))
+genes_detected_5TPM <- apply(X = tpm(sce), MARGIN = 2, FUN = function(x) length(which(x >= 5)))
+genes_detected_1cnt <- apply(X = counts(sce), MARGIN = 2, FUN = function(x) length(which(x >= 1)))
+genes_detected_5cnt <- apply(X = counts(sce), MARGIN = 2, FUN = function(x) length(which(x >= 5)))
+
+colData(sce) <- cbind(colData(sce), QCcells)
+colData(sce) <- cbind(colData(sce), data.frame(genes_detected_1TPM = genes_detected_1TPM,
+                                               genes_detected_5TPM = genes_detected_5TPM, 
+                                               genes_detected_1cnt = genes_detected_1cnt,
+                                               genes_detected_5cnt = genes_detected_5cnt))
+
+
+rm(fd, QCcells)
+rm(genes_detected_1TPM, genes_detected_5TPM, genes_detected_1cnt, genes_detected_5cnt)
+
+# Cell pheno data
+pheno <- as.data.frame(colData(sce), row.names = sce$Barcode)
+
+rm(sce)
+
+```
+
++ Total features: `r nrow(ged)`.
+
++ Total number of barcodes `r ncol(ged)`.
+
+# Data filtering
+
+## Protein coding genes
+
+```{r}
+
+# Seurat object
+iDA <- CreateSeuratObject(counts = pc_counts, meta.data = pheno, project = "Sorted_Treatment", min.cells = 0, min.features = 0)
+
+rm(ged, pc_counts, pc_genes)
+
+```
+
++ Total features: `r nrow(iDA)` .
+
++ Total number of barcodes `r ncol(iDA)`.
+
+## Filtering cells 
+
+### Cells with low number of genes detected.
+
+```{r fig.height=3, fig.width=4}
+
+mingenes <- 2000
+
+plot(density(pheno$genes_detected_1cnt), main = "Genes detected (1 count)")
+abline( v = mingenes, col = "red", lty = 2)
+text(x = mingenes, y = 0.00010, labels = paste(mingenes, "genes"), srt = 90, pos = 2)
+
+```
+
+```{r}
+
+cat("\n + Barcodes per sample: \n")
+table(pheno$Group)
+cat("\n")
+
+cat("\n + Barcodes per sample with < ", mingenes, "genes detected: \n")
+table(pheno$Group[which(pheno$genes_detected_1cnt < mingenes)])
+cat("\n")
+
+cat("\n + Barcodes per sample with > ", mingenes, "genes detected: \n")
+table(pheno$Group[which(pheno$genes_detected_1cnt > mingenes)])
+cat("\n")
+
+iDA <- subset(x = iDA, cells = pheno$Barcode[which(pheno$genes_detected_1cnt > mingenes)])
+
+rm(mingenes)
+
+```
+
++ Total features: `r nrow(iDA)` .
+
++ Total number of barcodes `r ncol(iDA)`.
+
+### Internal controls
+
+```{r}
+
+cat("+ We furhter removed", length(which(iDA$Group == "NegCtrl")), " NegCtrl samples \n")
+cat("+ We furhter removed", length(which(iDA$Group == "PosCtrl")), " PosCtrl samples \n")
+
+iDA <- subset(x = iDA, cells = iDA$Barcode[!(iDA$Group == "NegCtrl")])
+iDA <- subset(x = iDA, cells = iDA$Barcode[!(iDA$Group == "PosCtrl")])
+
+```
+
++ Total features: `r nrow(iDA)` .
+
++ Total number of barcodes `r ncol(iDA)`.
+
+
+### Cells with high % of mitochondrial reads
+
+```{r}
+
+cat("+ We furhter removed", length(which(iDA$Percent_Mitochondrial_Reads > 20)), 
+    "cell with high % of mitochondrial reads (> 20%) \n")
+
+iDA <- subset(x = iDA, cells = iDA$Barcode[!(iDA$Percent_Mitochondrial_Reads > 20)])
+
+cat("At the end", sum(table(iDA$Group)), "cells remained:\t")
+table(iDA$Group)
+
+```
+
++ Total features: `r nrow(iDA)` .
+
++ Total number of barcodes `r ncol(iDA)`.
+
+### Cells with low number of mapped reads
+
+```{r}
+
+cat("+ We furhter removed", length(which(iDA$Mapped_Reads < 100000)), 
+    "cell with low numer of mapped reads (< 100000) \n")
+
+iDA <- subset(x = iDA, cells = iDA$Barcode[!(iDA$Mapped_Reads < 100000)])
+
+cat("At the end", sum(table(iDA$Group)), "cells remained:\t")
+table(iDA$Group)
+
+```
+
++ Total features: `r nrow(iDA)` .
+
++ Total number of barcodes `r ncol(iDA)`.
+
+## Filtering genes
+
+## Genes consistently expressed across cells
+
+```{r warning=FALSE}
+
+cells_nonzero <- apply(X = iDA[["RNA"]]@counts, MARGIN = 1, FUN = function(x) length(which(x != 0)))
+cells_above1 <- apply(X = iDA[["RNA"]]@counts, MARGIN = 1, FUN = function(x) length(which(x > 1)))
+cells_above5 <- apply(X = iDA[["RNA"]]@counts, MARGIN = 1, FUN = function(x) length(which(x > 5)))
+cells_above10 <- apply(X = iDA[["RNA"]]@counts, MARGIN = 1, FUN = function(x) length(which(x > 10)))
+
+output <- matrix(NA, nrow = 4, ncol = 100, dimnames = list(c("Non zero counts", "More than 1 count", "More than 5 counts", "More than 10 counts"), seq(.01, 1, .01)))
+
+percent_cells <- seq(.01, 1, .01)
+
+for(i in c(1:100)){
+  output[1, i] <- length(which(cells_nonzero > ncol(iDA) * percent_cells[i]))
+  output[2, i] <- length(which(cells_above1 > ncol(iDA) * percent_cells[i]))
+  output[3, i] <- length(which(cells_above5 > ncol(iDA) * percent_cells[i]))
+  output[4, i] <- length(which(cells_above10 > ncol(iDA) * percent_cells[i]))
+  
+}
+
+rm(i, percent_cells)
+
+output <- melt(output)
+colnames(output) <- c("Counts", "Fractions_Of_cells", "Genes")
+
+```
+
+
+```{r fig.width=5.5, fig.height=3.5}
+
+g1 <- ggplot(data = output, mapping = aes(x = Fractions_Of_cells, y = Genes, color = Counts)) + 
+  geom_point(size = 1) + 
+  scale_color_lancet() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) 
+
+g1 
+
+rm(g1, output)
+
+```
+
+## Filter lowly expressed genes
+
++ Keep genes with more than 1 count in at least 5 percent of the filtered cells.
+
+```{r}
+
+#keep_genes <- rownames(iDA)[which(cells_nonzero >= (ncol(iDA) * .1))]
+keep_genes <- rownames(iDA)[which(cells_above1 >= (ncol(iDA) * .05))]
+iDA <- subset(x = iDA, features = keep_genes)
+
+rm(cells_above1, cells_above10, cells_above5, cells_nonzero)
+rm(keep_genes)
+
+# Drop levels from metadata
+iDA@meta.data <- droplevels(iDA@meta.data)
+
+```
+
++ Total features: `r nrow(iDA)` .
+
++ Total number of barcodes `r ncol(iDA)`.
+
+## Gene markers
+
+```{r genemarkers}
+
+all_genes <- rownames(iDA)
+
+# Cell type markers
+gm <- read.table("../iPSC_DA_nuclei_cell_iCELL8/06_Pheno/CellType_Markers_Subset2.txt", sep = "\t", header = TRUE)
+gm <- data.frame(gm, Gene_ID = gene_info$Gene_ID[match(gm$Gene_Name, gene_info$Gene_Name)])
+
+cat("Markers not found in filtered data:", gm$Gene_Name[!(gm$Gene_ID %in% all_genes)],"\n")
+
+gm <- gm[gm$Gene_ID %in% all_genes, ]
+
+if(length(which(duplicated(gm$Gene_ID) == TRUE) > 0)) {
+  gm <- gm[-which(duplicated(gm$Gene_ID) == TRUE), ]
+}
+
+gm$Gene_ID <- factor(gm$Gene_ID, levels = gm$Gene_ID)
+
+```
+
+# Basal
+
+## Normalization and clustering 
+
++ Carried out in filtered cells.
+
++ Normalization LogNormalize (scale factor 1e6).
+
++ PCA based on the top 5000 most variable features.
+
++ UMAP based on top 10 PCS.
+
+```{r fig.height=3, fig.width=4}
+
+# Normalize subset of basal cells from Plate A
+iDA_basal <- subset(x = iDA, cells = iDA$Barcode[(iDA$Plate == "A")])
+iDA_basal <- subset(x = iDA_basal, cells = iDA_basal$Barcode[(iDA_basal$Treatment == "basal")])
+iDA_basal <- NormalizeData(iDA_basal, normalization.method = "LogNormalize", scale.factor = 1e6)
+iDA_basal <- FindVariableFeatures(iDA_basal, selection.method = "vst", nfeatures = 5000)
+
+# Scale on all data run PC in top 5000 most variable features
+iDA_basal <- ScaleData(iDA_basal, features = all_genes)
+iDA_basal <- RunPCA(iDA_basal, features = VariableFeatures(object = iDA_basal), verbose = FALSE)
+# Elbow plot
+barplot(iDA_basal@reductions$pca@stdev[1:20], xlab = "PC", ylab = "Standard Deviation", 
+        names.arg = 1:20, las = 2, col = grey.colors(20))
+
+# Cell cycle score
+s_genes <- gene_info$Gene_ID[match(cc.genes$s.genes, table = gene_info$Gene_Name)]
+g2m_genes <- gene_info$Gene_ID[match(cc.genes$g2m.genes, table = gene_info$Gene_Name)]
+s_genes <- intersect(rownames(iDA_basal), s_genes)
+g2m_genes <- intersect(rownames(iDA_basal), g2m_genes)
+iDA_basal <- CellCycleScoring(iDA_basal, s.features = s_genes, g2m.features = g2m_genes, set.ident = FALSE)
+rm(g2m_genes, s_genes)
+
+# UMAP and cell clustering 
+iDA_basal <- RunUMAP(iDA_basal, reduction = "pca", dims = 1:10)
+iDA_basal <- FindNeighbors(iDA_basal, dims = 1:10)
+iDA_basal <- FindClusters(iDA_basal, resolution = .9)
+
+# Rename clusters
+iDA_basal$seurat_clusters <- as.factor(paste("B", iDA_basal$seurat_clusters, sep = ""))
+
+# Threshold for DEGs
+cut_adjp <- 0.05
+
+```
+
+## Cluster gene markers
+
++ Gene markers per cluster (log2FC > 0.25, adjusted p value < 0.05 and only positive true).
+
+```{r DEAClusterbasal}
+
+# Differential expression analysis: cluster markers # 
+
+Idents(object = iDA_basal) <- iDA_basal$seurat_clusters
+
+DEA_basal_b0 <- FindMarkers(object = iDA_basal, ident.1 = "B0",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_basal_b1 <- FindMarkers(object = iDA_basal, ident.1 = "B1",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_basal_b2 <- FindMarkers(object = iDA_basal, ident.1 = "B2",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_basal_b3 <- FindMarkers(object = iDA_basal, ident.1 = "B3",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_basal_b4 <- FindMarkers(object = iDA_basal, ident.1 = "B4",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_basal_b5 <- FindMarkers(object = iDA_basal, ident.1 = "B5",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_basal_b0 <- DEA_basal_b0[which(DEA_basal_b0$p_val_adj < cut_adjp), ]
+DEA_basal_b1 <- DEA_basal_b1[which(DEA_basal_b1$p_val_adj < cut_adjp), ]
+DEA_basal_b2 <- DEA_basal_b2[which(DEA_basal_b2$p_val_adj < cut_adjp), ]
+DEA_basal_b3 <- DEA_basal_b3[which(DEA_basal_b3$p_val_adj < cut_adjp), ]
+DEA_basal_b4 <- DEA_basal_b4[which(DEA_basal_b4$p_val_adj < cut_adjp), ]
+DEA_basal_b5 <- DEA_basal_b5[which(DEA_basal_b5$p_val_adj < cut_adjp), ]
+
+# Number of DEGs per Cluster
+nDEG_Cluster_basal <- c(nrow(DEA_basal_b0), nrow(DEA_basal_b1), nrow(DEA_basal_b2),
+                        nrow(DEA_basal_b3), nrow(DEA_basal_b4), nrow(DEA_basal_b5))
+
+nDEG_Cluster_basal <- data.frame(Cluster = levels(iDA_basal$seurat_clusters),
+                                 DEG = nDEG_Cluster_basal)
+
+# Top DEGs by Cluster
+DEGs_Cluster_top_basal <- unique(c(head(rownames(DEA_basal_b0), 10), head(rownames(DEA_basal_b1), 10),
+                                   head(rownames(DEA_basal_b2), 10), head(rownames(DEA_basal_b3), 10),
+                                   head(rownames(DEA_basal_b4), 10), head(rownames(DEA_basal_b5), 10))) #,
+
+# All DEGs by Cluster
+DEGs_Cluster_basal <- unique(c(rownames(DEA_basal_b0), rownames(DEA_basal_b1),
+                               rownames(DEA_basal_b2), rownames(DEA_basal_b3),
+                               rownames(DEA_basal_b4), rownames(DEA_basal_b5)))
+
+# Add gene names
+DEA_basal_b0 <- data.frame(DEA_basal_b0, 
+                           Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_basal_b0),
+                                                                 table = gene_info$Gene_ID)])
+
+DEA_basal_b1 <- data.frame(DEA_basal_b1, 
+                           Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_basal_b1),
+                                                                 table = gene_info$Gene_ID)])
+
+DEA_basal_b2 <- data.frame(DEA_basal_b2, 
+                           Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_basal_b2),
+                                                                 table = gene_info$Gene_ID)])
+
+DEA_basal_b3 <- data.frame(DEA_basal_b3, 
+                           Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_basal_b3),
+                                                                 table = gene_info$Gene_ID)])
+
+DEA_basal_b4 <- data.frame(DEA_basal_b4, 
+                           Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_basal_b4),
+                                                                 table = gene_info$Gene_ID)])
+
+DEA_basal_b5 <- data.frame(DEA_basal_b5, 
+                           Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_basal_b5),
+                                                                 table = gene_info$Gene_ID)])
+
+```
+
+## Overlap cluster markers with cell type markers
+
+```{r celltypeannotbasal, results='asis'}
+
+# Overlap of cluster markers with cell type markers
+cat("\n\n\ + Overlap with cluster 0 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_basal_b0),]
+cat("\n\n\ + Overlap with cluster 1 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_basal_b1),]
+cat("\n\n\ + Overlap with cluster 2 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_basal_b2),]
+cat("\n\n\ + Overlap with cluster 3 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_basal_b3),]
+cat("\n\n\ + Overlap with cluster 4 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_basal_b4),]
+cat("\n\n\ + Overlap with cluster 5 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_basal_b5),]
+
+# Overlap cluster markers and gene markers
+ov_gm_DEGclust_basal <- gm[gm$Gene_ID %in% unique(unlist(DEGs_Cluster_basal)), ]
+ov_gm_DEGclust_basal <- droplevels(ov_gm_DEGclust_basal)
+
+```
+
+
+## Cell type assignment
+
+```{r celltypebasal}
+
+# Assign cell clusters to cell types
+cell_type <- as.character(iDA_basal$seurat_clusters)
+cell_type[which(cell_type == "B0")] <- "Neuronal"
+cell_type[which(cell_type == "B1")] <- "Neuronal"
+cell_type[which(cell_type == "B2")] <- "Progenitor"
+cell_type[which(cell_type == "B3")] <- "Neuronal"
+cell_type[which(cell_type == "B4")] <- "Progenitor"
+cell_type[which(cell_type == "B5")] <- "Glia"
+
+cell_type <- factor(x = cell_type, 
+                    levels = c("Progenitor", "Glia", "Neuronal"))
+
+iDA_basal <- AddMetaData(object = iDA_basal, metadata = cell_type, col.name = "Cell_type")
+rm(cell_type)
+
+```
+
+
+## Differential expression by Sorting status (BFP).
+
++ Contrasting gene expression only in neuronal clusters 
+
+```{r}
+
+iDA_basal_neu <- subset(x = iDA_basal, 
+                        cells = iDA_basal$Barcode[which((iDA_basal$seurat_clusters %in% c("B0", "B1", "B3") == TRUE))])
+
+Idents(object = iDA_basal_neu) <- iDA_basal_neu$BFP
+
+DEA_pos_neg <- FindMarkers(object = iDA_basal_neu, ident.1 = "positive", ident.2 = "negative",
+                           logfc.threshold = 0.25, test.use = "wilcox")
+
+DEA_pos_NS <- FindMarkers(object = iDA_basal_neu, ident.1 = "positive", ident.2 = "NS",
+                           logfc.threshold = 0.25, test.use = "wilcox")
+
+DEA_neg_NS <- FindMarkers(object = iDA_basal_neu, ident.1 = "negative", ident.2 = "NS",
+                           logfc.threshold = 0.25, test.use = "wilcox")
+
+DEA_pos_neg <- DEA_pos_neg[which(DEA_pos_neg$p_val_adj < cut_adjp), ]
+DEA_pos_NS <- DEA_pos_NS[which(DEA_pos_NS$p_val_adj < cut_adjp), ]
+DEA_neg_NS <- DEA_neg_NS[which(DEA_neg_NS$p_val_adj < cut_adjp), ]
+  
+# Number of DEGs by Sorting status in the most neuronal fraction
+nDEG_Sorting <- c(nrow(DEA_pos_neg), nrow(DEA_pos_NS), nrow(DEA_neg_NS))
+nDEG_Sorting <- data.frame(Comparison = c("Positive_vs_Negative", 
+                                          "Positive_vs_NS", 
+                                          "Negative_vs_NS"), 
+                           DEG = nDEG_Sorting)
+
+
+DEGs_Sorting <- list(`BFP+ vs BFP-` = rownames(DEA_pos_neg),
+                     `BFP+ vs NS` = rownames(DEA_pos_NS),
+                     `BFP- vs NS` = rownames(DEA_neg_NS))
+
+DEGs_Sorting_Type <- list(`UP_PositiveVsNegative_Neuronal` = rownames(DEA_pos_neg)[which(DEA_pos_neg$avg_log2FC > 0)],
+                          `UP_PositiveVsNS_Neuronal` = rownames(DEA_pos_NS)[which(DEA_pos_NS$avg_log2FC > 0)],
+                          `UP_NegativeVsNS_Neuronal` = rownames(DEA_neg_NS)[which(DEA_neg_NS$avg_log2FC > 0)],
+                          `DOWN_PositiveVsNegative_Neuronal` = rownames(DEA_pos_neg)[which(DEA_pos_neg$avg_log2FC < 0)],
+                          `DOWN_PositiveVsNS_Neuronal` = rownames(DEA_pos_NS)[which(DEA_pos_NS$avg_log2FC < 0)],
+                          `DOWN_NegativeVsNS_Neuronal` = rownames(DEA_neg_NS)[which(DEA_neg_NS$avg_log2FC < 0)])
+
+
+# Top 10 DEGS across the three comparisons.
+DEGs_Sorting_Top10 <- unique(unlist(lapply(DEGs_Sorting, FUN = function(x) head(x, 10))))
+
+
+# Add gene names
+DEA_pos_neg <- data.frame(DEA_pos_neg, 
+                          Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_pos_neg), 
+                                                                table = gene_info$Gene_ID)])
+
+DEA_pos_NS <- data.frame(DEA_pos_NS, 
+                          Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_pos_NS), 
+                                                                table = gene_info$Gene_ID)])
+
+DEA_neg_NS <- data.frame(DEA_neg_NS, 
+                          Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_neg_NS), 
+                                                                table = gene_info$Gene_ID)])
+
+```
+
+
+```{r godegSort}
+
+# Using cluster profiler
+
+# Gene Ontology Analysis for two different p value thresholds
+branch <- c("BP", "CC", "MF")
+bg <- unique(gene_info$Gene_Name[match(rownames(iDA), table = gene_info$Gene_ID)])
+cat("\n Background population:", length(bg), "\n")
+
+for(j in c(1:length(branch))){
+    for(i in c(1:length(DEGs_Sorting_Type))){
+      genei <- DEGs_Sorting_Type[[i]]
+      genei <- gene_info$Gene_Name[match(x = genei, table = gene_info$Gene_ID)]
+      goi <- enrichGO(gene = genei, 
+                      OrgDb = "org.Hs.eg.db",  
+                      keyType = "SYMBOL",  
+                      ont = branch[j],
+                      pAdjustMethod = "fdr",
+                      qvalueCutoff = 0.05,
+                      universe = bg)
+      saveRDS(goi, file = paste("./MPPSorted/GO_", 
+                                           branch[j] ,"_DEAwilcox_", 
+                                           names(DEGs_Sorting_Type)[i], ".rds", sep = ""))
+      write.table(goi@result, file = paste("./MPPSorted/GO_", 
+                                           branch[j] ,"_DEAwilcox_", 
+                                           names(DEGs_Sorting_Type)[i], ".csv", sep = ""), 
+                  sep = ",", quote = TRUE, row.names = FALSE)
+      rm(goi, genei)
+  }
+}
+
+rm(i, j, branch)
+
+```
+
+
+# MPP treated 
+
+## Normalization and clustering 
+
++ Carried out in filtered cells.
+
++ Normalization LogNormalize (scale factor 1e6).
+
++ PCA based on the top 5000 most variable features.
+
++ UMAP based on top 10 PCS.
+
+```{r fig.height=3, fig.width=4}
+
+# Normalize subset of MPP cells from Plate A
+iDA_MPP <- subset(x = iDA, cells = iDA$Barcode[(iDA$Plate == "A")])
+iDA_MPP <- subset(x = iDA_MPP, cells = iDA_MPP$Barcode[(iDA_MPP$Treatment == "MPP")])
+iDA_MPP <- NormalizeData(iDA_MPP, normalization.method = "LogNormalize", scale.factor = 1e6)
+iDA_MPP <- FindVariableFeatures(iDA_MPP, selection.method = "vst", nfeatures = 5000)
+all_genes <- rownames(iDA_MPP)
+
+# Scale on all data run PC in top 5000 most variable features
+iDA_MPP <- ScaleData(iDA_MPP, features = all_genes)
+iDA_MPP <- RunPCA(iDA_MPP, features = VariableFeatures(object = iDA_MPP), verbose = FALSE)
+# Elbow plot
+barplot(iDA_MPP@reductions$pca@stdev[1:20], xlab = "PC", ylab = "Standard Deviation", 
+        names.arg = 1:20, las = 2, col = grey.colors(20))
+
+# Cell cycle score
+s_genes <- gene_info$Gene_ID[match(cc.genes$s.genes, table = gene_info$Gene_Name)]
+g2m_genes <- gene_info$Gene_ID[match(cc.genes$g2m.genes, table = gene_info$Gene_Name)]
+s_genes <- intersect(rownames(iDA_MPP), s_genes)
+g2m_genes <- intersect(rownames(iDA_MPP), g2m_genes)
+iDA_MPP <- CellCycleScoring(iDA_MPP, s.features = s_genes, g2m.features = g2m_genes, set.ident = FALSE)
+rm(g2m_genes, s_genes)
+
+# UMAP and cell clustering 
+iDA_MPP <- RunUMAP(iDA_MPP, reduction = "pca", dims = 1:10)
+iDA_MPP <- FindNeighbors(iDA_MPP, dims = 1:10)
+iDA_MPP <- FindClusters(iDA_MPP, resolution = 1.2)
+
+# Rename clusters
+iDA_MPP$seurat_clusters <- as.factor(paste("M", iDA_MPP$seurat_clusters, sep = ""))
+
+# Threshold for DEGs
+cut_adjp <- 0.05
+
+```
+
+
+## Cluster gene markers
+
++ Gene markers per cluster (log2FC > 0.25, adjusted p value < 0.05 and only positive true).
+
+```{r DEAClusterMPP}
+
+# Differential expression analysis: cluster markers # 
+
+Idents(object = iDA_MPP) <- iDA_MPP$seurat_clusters
+
+DEA_MPP_m0 <- FindMarkers(object = iDA_MPP, ident.1 = "M0",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_MPP_m1 <- FindMarkers(object = iDA_MPP, ident.1 = "M1",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_MPP_m2 <- FindMarkers(object = iDA_MPP, ident.1 = "M2",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_MPP_m3 <- FindMarkers(object = iDA_MPP, ident.1 = "M3",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_MPP_m4 <- FindMarkers(object = iDA_MPP, ident.1 = "M4",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_MPP_m5 <- FindMarkers(object = iDA_MPP, ident.1 = "M5",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_MPP_m0 <- DEA_MPP_m0[which(DEA_MPP_m0$p_val_adj < cut_adjp), ]
+DEA_MPP_m1 <- DEA_MPP_m1[which(DEA_MPP_m1$p_val_adj < cut_adjp), ]
+DEA_MPP_m2 <- DEA_MPP_m2[which(DEA_MPP_m2$p_val_adj < cut_adjp), ]
+DEA_MPP_m3 <- DEA_MPP_m3[which(DEA_MPP_m3$p_val_adj < cut_adjp), ]
+DEA_MPP_m4 <- DEA_MPP_m4[which(DEA_MPP_m4$p_val_adj < cut_adjp), ]
+DEA_MPP_m5 <- DEA_MPP_m5[which(DEA_MPP_m5$p_val_adj < cut_adjp), ]
+
+# Number of DEGs per Cluster
+nDEG_Cluster_MPP <- c(nrow(DEA_MPP_m0), nrow(DEA_MPP_m1), nrow(DEA_MPP_m2),
+                      nrow(DEA_MPP_m3), nrow(DEA_MPP_m4), nrow(DEA_MPP_m5))
+
+nDEG_Cluster_MPP <- data.frame(Cluster = levels(iDA_MPP), #
+                               DEG = nDEG_Cluster_MPP)
+
+# Top DEGs by Cluster
+DEGs_Cluster_top_MPP <- unique(c(head(rownames(DEA_MPP_m0), 10), head(rownames(DEA_MPP_m1), 10),
+                                 head(rownames(DEA_MPP_m2), 10), head(rownames(DEA_MPP_m3), 10),
+                                 head(rownames(DEA_MPP_m4), 10), head(rownames(DEA_MPP_m5), 10)))
+
+# All DEGs by Cluster
+DEGs_Cluster_MPP <- unique(c(rownames(DEA_MPP_m0), rownames(DEA_MPP_m1),
+                             rownames(DEA_MPP_m2), rownames(DEA_MPP_m3),
+                             rownames(DEA_MPP_m4), rownames(DEA_MPP_m5)))
+
+# Add gene names
+DEA_MPP_m0 <- data.frame(DEA_MPP_m0, 
+                           Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_MPP_m0),
+                                                                 table = gene_info$Gene_ID)])
+
+DEA_MPP_m1 <- data.frame(DEA_MPP_m1, 
+                           Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_MPP_m1),
+                                                                 table = gene_info$Gene_ID)])
+
+DEA_MPP_m2 <- data.frame(DEA_MPP_m2, 
+                           Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_MPP_m2),
+                                                                 table = gene_info$Gene_ID)])
+
+DEA_MPP_m3 <- data.frame(DEA_MPP_m3, 
+                           Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_MPP_m3),
+                                                                 table = gene_info$Gene_ID)])
+
+DEA_MPP_m4 <- data.frame(DEA_MPP_m4, 
+                           Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_MPP_m4),
+                                                                 table = gene_info$Gene_ID)])
+
+DEA_MPP_m5 <- data.frame(DEA_MPP_m5, 
+                           Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_MPP_m5),
+                                                                 table = gene_info$Gene_ID)])
+
+```
+
+## Overlap cluster markers with cell type markers
+
+```{r celltypeannot, results='asis'}
+
+# Overlap of cluster markers with cell type markers
+cat("\n\n\ + Overlap with cluster 0 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_MPP_m0),]
+cat("\n\n\ + Overlap with cluster 1 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_MPP_m1),]
+cat("\n\n\ + Overlap with cluster 2 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_MPP_m2),]
+cat("\n\n\ + Overlap with cluster 3 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_MPP_m3),]
+cat("\n\n\ + Overlap with cluster 4 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_MPP_m4),]
+cat("\n\n\ + Overlap with cluster 5 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_MPP_m5),]
+
+# Overlap cluster markers and gene markers
+ov_gm_DEGclust_MPP <- gm[gm$Gene_ID %in% unique(unlist(DEGs_Cluster_MPP)), ]
+ov_gm_DEGclust_MPP <- droplevels(ov_gm_DEGclust_MPP)
+
+
+```
+
+## Cell type assignment
+
+```{r celltypeMPP}
+
+# Assign cell clusters to cell types
+cell_type <- as.character(iDA_MPP$seurat_clusters)
+cell_type[which(cell_type == "M0")] <- "Neuronal"
+cell_type[which(cell_type == "M1")] <- "Progenitor"
+cell_type[which(cell_type == "M2")] <- "Neuronal"
+cell_type[which(cell_type == "M3")] <- "Neuronal"
+cell_type[which(cell_type == "M4")] <- "Progenitor"
+cell_type[which(cell_type == "M5")] <- "Progenitor"
+
+cell_type <- factor(x = cell_type, 
+                    levels = c("Progenitor", "Neuronal"))
+
+iDA_MPP <- AddMetaData(object = iDA_MPP, metadata = cell_type, col.name = "Cell_type")
+rm(cell_type)
+
+```
+
+## Prediction using Basal clusters
+
+```{r}
+
+# Prediction of MPP clusters based on basal 
+tranf_anchors <- FindTransferAnchors(reference = iDA_basal, 
+                                     query = iDA_MPP, 
+                                     dims = 1:10, 
+                                     reference.reduction = "pca")
+
+predictions <- TransferData(anchorset = tranf_anchors, 
+                            refdata = iDA_basal$seurat_clusters, 
+                            dims = 1:10)
+
+iDA_MPP <- AddMetaData(object = iDA_MPP, 
+                       metadata = predictions$predicted.id,
+                       col.name = "Predicted_Basal")
+
+iDA_MPP <- AddMetaData(object = iDA_MPP, 
+                       metadata = predictions$prediction.score.max,
+                       col.name = "Max_Prediction_Score")
+
+rm(tranf_anchors, predictions)
+
+```
+
+## Proportion basal/predicted basal clusters before and after MPP
+
+```{r}
+
+# Proportion of basal and predicted (for MPP) basal cell clusters.
+prop_clusters <- data.frame(Cluster = levels(iDA_basal$seurat_clusters),
+                            Basal = as.numeric(table(iDA_basal$seurat_clusters)) / ncol(iDA_basal), 
+                            MPP = as.numeric(table(iDA_MPP$Predicted_Basal)) / ncol(iDA_MPP))
+
+# Number of cells per cluster (basal/predicted basal)
+cell_cluster <- data.frame(rbind(as.numeric(table(iDA_basal$seurat_clusters)),
+                                 as.numeric(table(iDA_MPP$Predicted_Basal))), 
+                           row.names = c("Basal", "MPP"))
+colnames(cell_cluster) <- levels(iDA_basal$seurat_clusters)
+
+
+# Number of cells per neuronal cluster in Basal and MPP (predicted basal cluster)
+cat("\n\n+ Cells per neuronal cluster (basal/ predicted basal):\n")
+cell_cluster[, c("B0", "B1", "B3")]
+cat("\n")
+
+# Test if the proportions in the neuronal populations are different between basal and MPP
+chisq.test(cell_cluster[, c("B0", "B1", "B3")]) 
+
+# Basal cluster 0, 1 and 3
+# X-squared = 60.517, df = 2, p-value = 7.224e-14
+```
+
+## Number of NS, BFP positive and BFP negative neurons before and after MPP
+
++ In neuronal clusters B0, B1, B3, M0, M2, M3.
+
+```{r}
+
+# Number of neuronal NS, BFP+ and BFP- cells.
+cell_BFP <- data.frame(rbind(as.numeric(table(iDA_basal$BFP[which(iDA_basal$Cell_type %in% "Neuronal")])),
+                             as.numeric(table(iDA_MPP$BFP[which(iDA_MPP$Cell_type %in% "Neuronal")]))),
+                       row.names = c("Basal", "MPP"))
+colnames(cell_BFP) <- levels(iDA_basal$BFP)
+
+
+# Number of cells in neuronal clusters in Basal and MPP (predicted basal cluster) per sorting status
+cat("\n\n+ Neuronal cells per sorting status in Basal and MPP+ treated\n")
+cell_BFP
+cat("\n")
+
+
+# Test if the proportions of neuronal NS, BFP+ and BFP- populations are different between basal and MPP
+chisq.test(cell_BFP)
+
+#	Pearson's Chi-squared test
+# data:  cell_BFP
+# X-squared = 14.118, df = 2, p-value = 0.0008598
+
+# Old data # X-squared = 6.6959, df = 2, p-value = 0.03516 # Old data #
+
+```
+
+
+# Basal and MPP
+
++ Carried out in filtered cells.
+
++ Normalization LogNormalize (scale factor 1e6).
+
++ PCA based on the top 5000 most variable features.
+
++ UMAP based on top 10 PCS.
+
+```{r fig.height=3, fig.width=4}
+
+# Normalize subset of basal cells from Plate A
+iDA_both <- subset(x = iDA, cells = iDA$Barcode[(iDA$Plate == "A")])
+iDA_both <- NormalizeData(iDA_both, normalization.method = "LogNormalize", scale.factor = 1e6)
+iDA_both <- FindVariableFeatures(iDA_both, selection.method = "vst", nfeatures = 5000)
+all_genes <- rownames(iDA_both)
+
+# Scale on all data run PC in top 5000 most variable features
+iDA_both <- ScaleData(iDA_both, features = all_genes)
+iDA_both <- RunPCA(iDA_both, features = VariableFeatures(object = iDA_both), verbose = FALSE)
+
+# Elbow plot
+barplot(iDA_both@reductions$pca@stdev[1:20], xlab = "PC", ylab = "Standard Deviation", 
+        names.arg = 1:20, las = 2, col = grey.colors(20))
+
+# UMAP
+iDA_both <- RunUMAP(iDA_both, reduction = "pca", dims = 1:10)
+
+# Add cluster annotations 
+cluster_identity <- c(iDA_basal$seurat_clusters, iDA_MPP$seurat_clusters)
+cluster_identity <- cluster_identity[colnames(iDA_both)]
+
+cell_type <- c(iDA_basal$Cell_type, iDA_MPP$Cell_type)
+cell_type <- cell_type[colnames(iDA_both)]
+
+# Add cluster annotation and cell type 
+iDA_both <- AddMetaData(object = iDA_both, metadata = cluster_identity, col.name = "seurat_clusters")
+iDA_both <- AddMetaData(object = iDA_both, metadata = cell_type, col.name = "Cell_type")
+
+rm(cluster_identity, cell_type)
+
+# Threshold for DEGs
+cut_adjp <- 0.05
+
+```
+
+## Differential expression MPP vs basal
+
++ In neuronal cells by sorting status.
+
+```{r}
+
+# Neuronal cells only
+iDA_both_neu <- subset(iDA_both, cells = iDA_both$Barcode[which(iDA_both$Cell_type %in% "Neuronal")])
+
+# Create subgroup for contrast
+subgroup <- paste(iDA_both_neu$BFP, iDA_both_neu$Treatment, sep = "_")
+iDA_both_neu <- AddMetaData(object = iDA_both_neu, metadata = subgroup, col.name = "Subgroup")
+
+Idents(object = iDA_both_neu) <- iDA_both_neu$Subgroup
+
+DEA_MPP_basal_positive <- FindMarkers(object = iDA_both_neu, ident.1 = "positive_MPP", ident.2 = "positive_basal",
+                                      logfc.threshold = 0.25, test.use = "wilcox")
+
+DEA_MPP_basal_negative <- FindMarkers(object = iDA_both_neu, ident.1 = "negative_MPP", ident.2 = "negative_basal",
+                                      logfc.threshold = 0.25, test.use = "wilcox")
+
+DEA_MPP_basal_NS <- FindMarkers(object = iDA_both_neu, ident.1 = "NS_MPP", ident.2 = "NS_basal",
+                                      logfc.threshold = 0.25, test.use = "wilcox")
+
+
+DEA_MPP_basal_positive <- DEA_MPP_basal_positive[which(DEA_MPP_basal_positive$p_val_adj < cut_adjp), ]
+DEA_MPP_basal_negative <- DEA_MPP_basal_negative[which(DEA_MPP_basal_negative$p_val_adj < cut_adjp), ]
+DEA_MPP_basal_NS <- DEA_MPP_basal_NS[which(DEA_MPP_basal_NS$p_val_adj < cut_adjp), ]
+  
+# Number of DEGs between MPP and basal neurons (Done separately per sorting status)
+nDEG_MPP <- c(nrow(DEA_MPP_basal_positive), nrow(DEA_MPP_basal_negative), nrow(DEA_MPP_basal_NS))
+nDEG_MPP <- data.frame(Comparison = c("MPP_vs_basal_positive", 
+                                      "MPP_vs_basal_negative", 
+                                      "MPP_vs_basal_NS"), 
+                           DEG = nDEG_MPP)
+
+DEGs_MPP <- list(`MPPvsBasalPositive` = rownames(DEA_MPP_basal_positive),
+                 `MPPvsBasalNegative` = rownames(DEA_MPP_basal_negative),
+                 `MPPvsBasalNS` = rownames(DEA_MPP_basal_NS))
+
+# Top 20 DEGS across the three comparisons.
+DEGs_MPP_Top20 <- unique(unlist(lapply(DEGs_MPP, FUN = function(x) head(x, 20))))
+
+
+# Add gene names
+DEA_MPP_basal_positive <- data.frame(DEA_MPP_basal_positive,
+                                     Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_MPP_basal_positive),
+                                                                           table = gene_info$Gene_ID)])
+
+DEA_MPP_basal_negative <- data.frame(DEA_MPP_basal_negative,
+                                     Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_MPP_basal_negative),
+                                                                           table = gene_info$Gene_ID)])
+
+DEA_MPP_basal_NS <- data.frame(DEA_MPP_basal_NS,
+                               Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_MPP_basal_NS),
+                                                                     table = gene_info$Gene_ID)])
+
+
+```
+
+
+```{r godegMPP}
+
+# Using cluster profiler
+
+# Gene Ontology Analysis for two different p value thresholds
+branch <- c("BP", "CC", "MF")
+bg <- unique(gene_info$Gene_Name[match(rownames(iDA), table = gene_info$Gene_ID)])
+cat("\n Background population:", length(bg), "\n")
+
+for(j in c(1:length(branch))){
+    for(i in c(1:length(DEGs_MPP))){
+      genei <- DEGs_MPP[[i]]
+      genei <- gene_info$Gene_Name[match(x = genei, table = gene_info$Gene_ID)]
+      goi <- enrichGO(gene = genei, 
+                      OrgDb = "org.Hs.eg.db",  
+                      keyType = "SYMBOL",  
+                      ont = branch[j],
+                      pAdjustMethod = "fdr",
+                      qvalueCutoff = 0.05,
+                      universe = bg)
+      saveRDS(goi, file = paste("./MPPSorted/GO_", 
+                                branch[j] ,"_DEAwilcox_", 
+                                names(DEGs_MPP)[i], ".rds", sep = ""))
+
+      write.table(goi@result, file = paste("./MPPSorted/GO_", 
+                                           branch[j] ,"_DEAwilcox_", 
+                                           names(DEGs_MPP)[i], ".csv", sep = ""), 
+                  sep = ",", quote = TRUE, row.names = FALSE)
+      rm(goi, genei)
+  }
+}
+
+rm(i, j, branch)
+
+```
+
+
+## VTA and SN DEG (Nichterwitz 2016)
+
+```{r VTAandSN}
+
+# 111 genes differentially expressed between the SN and the VTA
+vta_sn <- read.table(file = "./07_GeneMarkers/VTA_SN_DEG_Nichterwitz_2016.txt", header = TRUE)
+vta_sn <- vta_sn[vta_sn$Ensembl %in% rownames(iDA), ]
+area <- vector()
+area[which(vta_sn$log2FoldChange > 0)] <- "VTA"
+area[which(vta_sn$log2FoldChange < 0)] <- "SN"
+vta_sn <- data.frame(vta_sn, area = area, row.names = 1:nrow(vta_sn))
+rm(area)
+
+```
+
+```{r VTASNheatmap}
+
+#iDA_both_neu
+
+mat <- iDA_both_neu[["RNA"]]@data[vta_sn$Ensembl, ] %>% as.matrix()
+
+## scale the rows
+mat <- t(scale(t(mat)))
+
+## quantile(mat, c(0.1, 0.95))
+cluster_an1 <- iDA_both_neu$Treatment
+cluster_an2 <- iDA_both_neu$BFP
+cluster_an3 <- droplevels(iDA_both_neu$seurat_clusters)
+
+clustrows <- factor(paste(cluster_an1, cluster_an2, cluster_an3, sep = "_"), 
+               levels = c("basal_NS_B0", "basal_NS_B1", "basal_NS_B3",  
+                          "basal_positive_B0", "basal_positive_B1", "basal_positive_B3",
+                          "basal_negative_B0",
+                          "MPP_NS_M0", "MPP_NS_M2", 
+                          "MPP_positive_M0", "MPP_positive_M2", "MPP_positive_M3",
+                          "MPP_negative_M2", "MPP_negative_M3"))
+
+
+col_fun = circlize::colorRamp2(c(-1.5, 0, 1.5), c("#FF00FF", "black", "#FFFF00"))
+
+
+pdf(file = "./Figures/VTA_SN_markers_heatmap_Neurons.pdf", width = 7, height = 9)
+
+Heatmap(mat, name = "Expression",  
+        column_split = factor(clustrows),
+        row_split = vta_sn$area,
+        row_labels = vta_sn$RefSeq, 
+        cluster_columns = FALSE,
+        show_column_dend = FALSE,
+        cluster_column_slices = TRUE,
+        column_title_gp = gpar(fontsize = 8),
+        column_gap = unit(0.5, "mm"),
+        cluster_rows = TRUE,
+        show_row_dend = FALSE,
+        col = col_fun,
+        row_names_gp = gpar(fontsize = 4),
+        column_title_rot = 90,
+        top_annotation = HeatmapAnnotation(Treatment = cluster_an1, 
+                                           BFP = cluster_an2, 
+                                           Cluster = cluster_an3,
+                                           col = list(Treatment = c("basal" = pal_aaas()(2)[1], "MPP" = pal_aaas()(2)[2]),
+                                                      BFP = c("NS" = unlist(as.list(met.brewer(name = "Isfahan2", n = 3)))[1],
+                                                              "negative" = unlist(as.list(met.brewer(name = "Isfahan2", n = 3)))[2], 
+                                                              "positive" = unlist(as.list(met.brewer(name = "Isfahan2", n = 3)))[3]),
+                                                      Cluster = c("B0" = pal_d3()(6)[1], "B1" = pal_d3()(6)[2], "B3" = pal_d3()(6)[4], 
+                                                                  "M0" = unlist(as.list(met.brewer(name = "VanGogh2", n = 6)))[1], 
+                                                                  "M2" = unlist(as.list(met.brewer(name = "VanGogh2", n = 6)))[3],  
+                                                                  "M3" = unlist(as.list(met.brewer(name = "VanGogh2", n = 6)))[4]))),
+        show_column_names = FALSE,
+        use_raster = TRUE,
+        raster_quality = 4)
+
+dev.off()
+
+rm(mat, clustrows, col_fun, cluster_an1, cluster_an2, cluster_an3)
+
+```
+
+```{r ovVTASN}
+
+cat("\n\n Overlap VTA vs SN and BFP Pos vs Neg degs: \n")
+gene_info$Gene_Name[match(x = intersect(rownames(DEA_pos_neg), vta_sn$Ensembl), table = gene_info$Gene_ID)]
+
+DEA_pos_neg[intersect(rownames(DEA_pos_neg), vta_sn$Ensembl),]
+cat("\n")
+
+ov <- intersect(rownames(DEA_pos_neg), vta_sn$Ensembl)
+figov <- DotPlot(object = iDA_basal_neu, features = ov)
+figov$data$features.plot <- gene_info$Gene_Name[match(x = figov$data$features.plot, table = gene_info$Gene_ID)]
+figov <- figov  +theme(legend.position = "top", legend.direction = "horizontal", legend.box = "vertical", legend.title = element_blank())
+figov2 <- VlnPlot(object = iDA_basal_neu, features = ov, same.y.lims = TRUE, combine = FALSE)
+figov2 <- lapply(figov2, FUN = function(x) x + ggtitle(label = gene_info$Gene_Name[match(x$labels$title, table = gene_info$Gene_ID)]))
+
+pdf("./Figures/VTA_SN_Neurons_Basal.pdf", height = 7, width = 7)
+plot_grid(figov, figov2[[1]], figov2[[2]], figov2[[3]], ncol = 2)
+dev.off()
+
+rm(figov, figov2)
+
+```
+
+
+## VTA and SN (Del Aguila 2021)
+
+```{r}
+
+sn <- c("GSG1L", "ATP2A3", "CBLN1", "RGS16", "SLIT1")
+vta <- c("CADM1", "NECAB1",  "TIMP2", "GNG4", "FXYD6", 
+         "ZCCHC12", "KCNIP4", "CDH13", "OSBPL3", "ARHGAP26", 
+         "PEG3", "CRYM", "SERPINE2", "PCSK2") # "LYH6" not matched # EN2 not in dataset
+
+sn_vta_ens <- gene_info$Gene_ID[match(c(sn, vta), table = gene_info$Gene_Name)]
+
+# Markers by Del Aguila
+cat("\n\n + SN gene markers: \n")
+sn
+cat("\n\n + VTA gene markers: \n")
+vta
+
+# Overlap with genes DEG bewteen sorted populations
+cat("\n\n + Ovelapping markers DE between Pos and Neg \n")
+gene_info$Gene_Name[match(rownames(DEA_pos_neg)[rownames(DEA_pos_neg) %in% sn_vta_ens], gene_info$Gene_ID)]
+cat("\n")
+
+```
+
+
+# Code for figures
+
+```{r obj4plots}
+
+# Basal 
+
+# Updated pheno data for Figs # Add UMAP dims
+pheno_basal <- data.frame(iDA_basal@meta.data, iDA_basal@reductions$umap@cell.embeddings[, 1:2])
+
+
+# MPP 
+
+# Updated pheno data for Figs # Add UMAP dims
+pheno_MPP <- data.frame(iDA_MPP@meta.data, iDA_MPP@reductions$umap@cell.embeddings[, 1:2])
+
+
+# Both
+
+# Updated pheno data for Figs # Add UMAP dims
+pheno_both <- data.frame(iDA_both@meta.data, iDA_both@reductions$umap@cell.embeddings[, 1:2])
+
+
+# DEGs in MPP vs basal neurons.
+DEGs_MPP <- list(`MPP vs Basal\nBFP+` = rownames(DEA_MPP_basal_positive),
+                 `MPP vs Basal\nBFP-` = rownames(DEA_MPP_basal_negative),
+                 `MPP vs Basal\nNS` = rownames(DEA_MPP_basal_NS))
+
+
+```
+
+```{r fig5}
+
+# UMAP coloured by cluster
+cls <- aggregate.data.frame(x = pheno_basal[c("UMAP_1", "UMAP_2")], 
+                            by = list(pheno_basal$seurat_clusters), 
+                            FUN = median)
+cls <- data.frame(cls, Cell_type = pheno_basal$Cell_type[match(cls$Group.1, table = pheno_basal$seurat_clusters)])
+
+Fig5f <- ggplot(data = pheno_basal, mapping = aes(x = UMAP_1, y = UMAP_2, color = seurat_clusters)) +
+  geom_point(size = .3) + 
+  scale_color_d3(alpha = .7) + 
+  theme_cowplot() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  ggtitle(label = "") + 
+  xlab(label = "UMAP 1") + 
+  ylab(label = "UMAP 2") + 
+  guides(colour = guide_legend(override.aes = list(size = 2))) 
+Fig5f <- Fig5f + annotate("text", x = cls$UMAP_1, y = cls$UMAP_2, label = cls$Cell_type, size = 2)
+
+
+# A few markers
+mkr <- c("HMGB1", "HMGB2", "NR2F1", "ZEB2", "CDH2", "SOX9", "SNAP25", "SYT1", "NEFL", "NEFM", "SST", "MAOA", "OTX2")
+Fig5g <- DotPlot(object = iDA_basal, 
+                 features = gene_info$Gene_ID[match(x = mkr, table = gene_info$Gene_Name)], 
+                 dot.scale = 3) +
+  theme(axis.title = element_text(size = 10), 
+        axis.text.y = element_text(size = 8, hjust = 1, vjust = .5),
+        axis.text.x = element_text(size = 8),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.title = element_blank(), 
+        legend.position = "top", 
+        legend.direction = "horizontal",
+        legend.box = "vertical") +
+  coord_flip()
+
+Fig5g$data$features.plot <- factor(gene_info$Gene_Name[match(x = Fig5g$data$features.plot, table = gene_info$Gene_ID)], 
+                                   levels = rev(mkr))
+
+# UMAP coloured by sorting status
+Fig5h <- ggplot(data = pheno_basal, mapping = aes(x = UMAP_1, y = UMAP_2, color = BFP)) +
+  geom_point(size = .3) + 
+  scale_color_met_d(name = "Isfahan2") + 
+  theme_cowplot() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  ggtitle(label = "") + 
+  xlab(label = "UMAP 1") + 
+  ylab(label = "UMAP 2") + 
+  guides(colour = guide_legend(override.aes = list(size = 2))) 
+
+
+# Number of cells per Cluster coloured sorting status
+Fig5i <- ggplot(data = pheno_basal, mapping = aes(x = seurat_clusters, fill = BFP)) + 
+  geom_bar() + 
+  theme_cowplot() +
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_text(size = 8),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.title = element_blank(),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "vertical") + 
+  ylab("Number of cells") + 
+  xlab(label = "Cluster") + 
+  scale_fill_met_d(name = "Isfahan2") + 
+  guides(fill = guide_legend(override.aes = list(size = .5), ncol = 2, byrow = FALSE))
+
+
+
+# Number of DEGs by sorting status
+Fig5j <- ggvenn(data = DEGs_Sorting, 
+                show_percentage = FALSE, 
+                set_name_size = 2.5, text_size = 2.2,
+                fill_color = unlist(as.list(met.brewer(name = "Egypt", n = 3))), 
+                stroke_alpha = 0, 
+                stroke_color = "white", 
+                show_elements = FALSE)
+
+# Heatmap of top 10 DEGs by sorting status (unique DEGs across 3 comparisons)
+Fig5k <- DoHeatmap(object = iDA_basal_neu, 
+                   #slot = "scale.data",
+                   features = DEGs_Sorting_Top10, 
+                   lines.width = 10,
+                   group.by = "BFP", 
+                   group.bar.height = .05,  
+                   angle = 0, 
+                   size = 4,
+                   group.colors = unlist(as.list(met.brewer(name = "Isfahan2", n = 3)))) + 
+  theme(legend.title = element_blank(),
+        legend.position = "bottom", 
+        legend.direction = "horizontal", 
+        legend.box.just = "right", 
+        axis.text.y = element_text(size = 8))
+
+Fig5k$data$Feature <- gene_info$Gene_Name[match(x = Fig5k$data$Feature, table = gene_info$Gene_ID)]
+
+```
+
+```{r fig5pdf}
+
+pdf(file = "./Figures/Fig5_v3.pdf", height = 6, width = 7)
+plot_grid(plot_grid(Fig5f, Fig5g, Fig5h, Fig5i, 
+                    ncol = 4, 
+                    align = "h", 
+                    axis = "bt", 
+                    labels = c("F", "G", "H", "I"),
+                    rel_widths = c(1, 1.1, 1, 1)),
+          plot_grid(Fig5j, Fig5k, 
+                    ncol = 2, 
+                    align = "h", 
+                    axis = "bt", 
+                    labels = c("J", "K"), 
+                    rel_widths = c(1, 1.7)), 
+          ncol = 1, rel_heights = c(1, 1.2))
+dev.off()
+
+
+# Save as Objects
+saveRDS(object = Fig5f, "./Figures/Fig5f.rds")
+saveRDS(object = Fig5g, "./Figures/Fig5g.rds")
+saveRDS(object = Fig5h, "./Figures/Fig5h.rds")
+saveRDS(object = Fig5i, "./Figures/Fig5i.rds")
+saveRDS(object = Fig5j, "./Figures/Fig5j.rds")
+saveRDS(object = Fig5k, "./Figures/Fig5k.rds")
+
+rm(Fig5f, Fig5g, Fig5h, Fig5i, Fig5j, Fig5k)
+
+```
+
+```{r figS4}
+
+# A ) Expression levels of tagBFP
+FigS4a <- VlnPlot(object = iDA_basal, features = "ENSG00000000000", group.by = "BFP", assay = "RNA") + 
+  theme_cowplot() + 
+  scale_fill_met_d(name = "Isfahan2") + 
+  theme(title = element_text(hjust = .5),
+        axis.title = element_text(size = 10),
+        axis.text = element_text(size = 8),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  ggtitle(label = "")
+
+# B) Number of differentially expressed genes per cluster (Cluster markers basal)
+FigS4b <- ggplot(data = nDEG_Cluster_basal, mapping = aes(x = Cluster, y = DEG, fill = Cluster)) + 
+  geom_col() + 
+  scale_fill_d3(palette = "category10") + 
+  theme_cowplot() +
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_text(size = 8),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.title = element_blank(),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal") + 
+  ylab("DEGs by Cluster") + 
+  geom_text(aes(label = DEG)) +
+  guides(fill = guide_legend(override.aes = list(size = .5), ncol = 4))
+
+
+# C) Top gene markers per Basal cluster
+FigS4c <- DotPlot(iDA_basal, features = DEGs_Cluster_top_basal, cluster.idents = TRUE) +
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_text(size = 8),
+        axis.text.y = element_text(size = 6, hjust = 1, vjust = .5), 
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.title = element_blank(), 
+        legend.position = "top", 
+        legend.direction = "horizontal", 
+        legend.box = "vertical") +
+  coord_flip()
+FigS4c$data$features.plot <- factor(gene_info$Gene_Name[match(x = DEGs_Cluster_top_basal, table = gene_info$Gene_ID)], 
+                                    levels = rev(gene_info$Gene_Name[match(x = DEGs_Cluster_top_basal, table = gene_info$Gene_ID)]))
+
+
+# D) All cell type markers from list 
+FigS4d <- DotPlot(iDA_basal, features = gm$Gene_ID, cluster.idents = TRUE) +
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_text(size = 8),
+        axis.text.y = element_text(size = 6, hjust = 1, vjust = .5), 
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.title = element_blank(), 
+        legend.position = "top", 
+        legend.direction = "horizontal", 
+        legend.box = "vertical") +
+  coord_flip()
+FigS4d$data$features.plot <- factor(gene_info$Gene_Name[match(x = gm$Gene_ID, 
+                                                              table = gene_info$Gene_ID)], 
+                                    levels = rev(gene_info$Gene_Name[match(x = gm$Gene_ID, table = gene_info$Gene_ID)]))
+
+```
+
+```{r figS4pdf}
+
+
+pdf("./Figures/FigS4_v3.pdf", height = 9, width = 7)
+plot_grid(plot_grid(FigS4a, FigS4b, FigS4c, ncol = 1, labels = c("A", "B", "C"), axis = "lr", align = "v", rel_heights = c(.8, .8, 2)),
+          FigS4d, ncol = 2, labels = c("", "D"))
+
+dev.off()
+
+# Save as Objects
+saveRDS(object = FigS4a, "./Figures/FigS4a.rds")
+saveRDS(object = FigS4b, "./Figures/FigS4b.rds")
+saveRDS(object = FigS4c, "./Figures/FigS4c.rds")
+saveRDS(object = FigS4d, "./Figures/FigS4d.rds")
+
+rm(FigS4a, FigS4b, FigS4c, FigS4d)
+
+
+```
+
+```{r figS5}
+
+a <- readRDS(file = "./MPPsorted/GO_BP_DEAwilcox_UP_PositiveVsNegative_Neuronal.rds")
+a <- simplify(a)
+
+b <- readRDS(file = "./MPPsorted/GO_BP_DEAwilcox_DOWN_PositiveVsNegative_Neuronal.rds")
+b <- simplify(b)
+
+fc <- DEA_pos_neg$avg_log2FC
+names(fc) <- DEA_pos_neg$Gene_Name
+
+FigS5a <- cnetplot(a, foldChange = fc, showCategory = 10)
+FigS5b <- cnetplot(b, foldChange = fc, showCategory = 10)
+
+rm(a,b,fc)
+
+```
+
+```{r figS5pdf}
+
+pdf("./Figures/FigS5_v3.pdf", height = 9, width = 7)
+plot_grid(FigS5a, FigS5b, ncol = 1, labels = c("A", "B"))
+dev.off()
+
+# Save as Objects
+saveRDS(object = FigS5a, "./Figures/FigS5a.rds")
+saveRDS(object = FigS5b, "./Figures/FigS5b.rds")
+
+rm(FigS5a, FigS5b)
+
+```
+
+```{r fig6}
+
+# D UMAP coloured by Treatment
+Fig6d <- ggplot(data = pheno_both, mapping = aes(x = UMAP_1, y = UMAP_2, color = Treatment)) +
+  geom_point(size = .3) + 
+  scale_color_aaas() + 
+  theme_cowplot() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  ggtitle(label = "") + 
+  xlab(label = "UMAP 1") + 
+  ylab(label = "UMAP 2") + 
+  guides(colour = guide_legend(override.aes = list(size = 2))) 
+
+# E UMAP coloured by Sorting Status
+Fig6e <- ggplot(data = pheno_both, mapping = aes(x = UMAP_1, y = UMAP_2, color = BFP)) +
+  geom_point(size = .3) + 
+  scale_color_met_d(name = "Isfahan2") + 
+  theme_cowplot() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  ggtitle(label = "") + 
+  xlab(label = "UMAP 1") + 
+  ylab(label = "UMAP 2") + 
+  guides(colour = guide_legend(override.aes = list(size = 2))) 
+
+# F UMAP coloured by cluster in MPP+ cells
+cls <- aggregate.data.frame(x = pheno_MPP[c("UMAP_1", "UMAP_2")], 
+                            by = list(pheno_MPP$seurat_clusters), 
+                            FUN = median)
+cls <- data.frame(cls, Cell_type = pheno_MPP$Cell_type[match(cls$Group.1, 
+                                                             table = pheno_MPP$seurat_clusters)])
+
+Fig6f <- ggplot(data = pheno_MPP, mapping = aes(x = UMAP_1, y = UMAP_2, color = seurat_clusters)) +
+  geom_point(size = .3) + 
+  scale_color_met_d(name = "VanGogh2") + 
+  theme_cowplot() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  ggtitle(label = "") + 
+  xlab(label = "UMAP 1") + 
+  ylab(label = "UMAP 2") + 
+  guides(colour = guide_legend(override.aes = list(size = 2))) 
+Fig6f <- Fig6f + annotate("text", x = cls$UMAP_1, y = cls$UMAP_2, label = cls$Cell_type, size = 2)
+
+
+# G. UMAP coloured by BFP sorting status
+Fig6g <- ggplot(data = pheno_MPP, mapping = aes(x = UMAP_1, y = UMAP_2, color = BFP)) +
+  geom_point(size = .3) + 
+  scale_color_met_d(name = "Isfahan2") + 
+  theme_cowplot() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  ggtitle(label = "") + 
+  xlab(label = "UMAP 1") + 
+  ylab(label = "UMAP 2") + 
+  guides(colour = guide_legend(override.aes = list(size = 2))) 
+
+# H A few markers
+mkr <- c("HMGB1", "HMGB2", "NR2F1", "ZEB2", "CDH2", "SOX9", "SNAP25", "SYT1", "NEFL", "NEFM", "SST", "MAOA", "OTX2")
+Fig6h <- DotPlot(object = iDA_MPP, 
+                 features = gene_info$Gene_ID[match(x = mkr, table = gene_info$Gene_Name)], 
+                 dot.scale = 3) +
+  theme(axis.title = element_text(size = 10), 
+        axis.text.y = element_text(size = 8, hjust = 1, vjust = .5),
+        axis.text.x = element_text(size = 8),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.title = element_blank(), 
+        legend.position = "top", 
+        legend.direction = "horizontal",
+        legend.box = "vertical") +
+  coord_flip()
+
+Fig6h$data$features.plot <- factor(gene_info$Gene_Name[match(x = Fig6h$data$features.plot, 
+                                                             table = gene_info$Gene_ID)], 
+                                   levels = rev(mkr))
+
+
+# Include proportion of M cluster by sorting status.
+Fig6i <- ggplot(data = pheno_MPP, mapping = aes(x = seurat_clusters, fill = BFP)) + 
+  geom_bar() + 
+  theme_cowplot() +
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_text(size = 8),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.title = element_blank(),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "vertical") + 
+  ylab("Number of cells") + 
+  xlab(label = "Cluster") + 
+  scale_fill_met_d(name = "Isfahan2") + 
+  guides(fill = guide_legend(override.aes = list(size = .5), ncol = 2, byrow = FALSE))
+
+
+
+# I. Proportion of cells in neuronal clusters 
+pcc <- melt(prop_clusters[c(1,2, 4), ])
+colnames(pcc) <- c("Cluster", "Treatment", "Proportion")
+
+Fig6j <- ggplot(data = pcc, mapping = aes(x = Cluster, fill = Treatment, y = Proportion)) + 
+  geom_col(position = "dodge") + 
+  theme_cowplot() + 
+  scale_fill_aaas() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_text(size = 8),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank())
+
+rm(pcc)
+
+# J Number of DEGs in MPP compared to basal by  sorting status
+Fig6k <- ggvenn(data = DEGs_MPP, 
+                show_percentage = FALSE, 
+                set_name_size = 2.5, 
+                text_size = 2.2,
+                fill_color = unlist(as.list(met.brewer(name = "Isfahan2", n = 3)[c(3, 2, 1)])), 
+                stroke_alpha = 0, 
+                stroke_color = "white", 
+                show_elements = FALSE)
+
+# Heatmap top DEG in response to PP
+Fig6l <- DoHeatmap(object = iDA_both_neu, 
+                   features = DEGs_MPP_Top20, 
+                   lines.width = 10,
+                   group.by = "Treatment", 
+                   group.bar.height = .05,  
+                   angle = 0, 
+                   size = 4, 
+                   group.colors = pal_aaas()(2)) + 
+  theme(legend.title = element_blank(), legend.position = "bottom", legend.direction = "horizontal", 
+        legend.box.just = "right", 
+        axis.text.y = element_text(size = 8))
+
+Fig6l$data$Feature <- gene_info$Gene_Name[match(x = Fig6l$data$Feature, table = gene_info$Gene_ID)]
+
+
+```
+
+```{r fig6pdf}
+
+pdf(file = "./Figures/Fig6_v3.pdf", width = 7, height = 9)
+plot_grid(plot_grid(Fig6d, Fig6e, Fig6f, Fig6g, ncol = 4, align = "hv", axis = "bt", labels = c("D", "E", "F", "G")),
+          plot_grid(Fig6h, Fig6i, Fig6j, ncol = 3, align = "v", axis = "b", labels = c("H", "I", "J")),
+          plot_grid(Fig6k, Fig6l, ncol = 2, labels = c("K", "L"), rel_widths = c(1, 2)), 
+          ncol = 1, rel_heights = c(1, 1.1, 1.7))
+dev.off()
+
+# Save as Objects
+saveRDS(object = Fig6d, "./Figures/Fig5d.rds")
+saveRDS(object = Fig6e, "./Figures/Fig5e.rds")
+saveRDS(object = Fig6f, "./Figures/Fig5f.rds")
+saveRDS(object = Fig6g, "./Figures/Fig5g.rds")
+saveRDS(object = Fig6h, "./Figures/Fig5h.rds")
+saveRDS(object = Fig6i, "./Figures/Fig5i.rds")
+saveRDS(object = Fig6j, "./Figures/Fig5j.rds")
+saveRDS(object = Fig6k, "./Figures/Fig5k.rds")
+
+rm(Fig6d, Fig6e, Fig6f, Fig6g, Fig6h, Fig6i, Fig6j, Fig6k, Fig6l)
+
+```
+
+```{r figS6}
+
+# A) Number of differentially expressed genes per cluster (Cluster markers MPP)
+FigS6a <- ggplot(data = nDEG_Cluster_MPP, mapping = aes(x = Cluster, y = DEG, fill = Cluster)) + 
+  geom_col() + 
+  scale_fill_met_d(name = "VanGogh2") + 
+  theme_cowplot() +
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_text(size = 8),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.title = element_blank(),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal") + 
+  ylab("DEGs by Cluster") + 
+  geom_text(aes(label = DEG), size = 2.5) +
+  guides(fill = guide_legend(override.aes = list(size = .5), ncol = 4))
+
+
+# B) Top gene markers per MPP cluster
+FigS6b <- DotPlot(iDA_MPP, features = DEGs_Cluster_top_MPP, cluster.idents = TRUE) +
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_text(size = 8),
+        axis.text.y = element_text(size = 6, hjust = 1, vjust = .5), 
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.title = element_blank(), 
+        legend.position = "top", 
+        legend.direction = "horizontal", 
+        legend.box = "vertical") +
+  coord_flip()
+FigS6b$data$features.plot <- factor(gene_info$Gene_Name[match(x = DEGs_Cluster_top_MPP, table = gene_info$Gene_ID)], 
+                                    levels = rev(gene_info$Gene_Name[match(x = DEGs_Cluster_top_MPP, table = gene_info$Gene_ID)]))
+
+
+# C) Known gene markers 
+FigS6c <- DotPlot(iDA_MPP, features = gm$Gene_ID, cluster.idents = TRUE) +
+  theme(axis.title = element_text(size = 10), 
+        axis.text.x = element_text(size = 8),
+        axis.text.y = element_text(size = 6, hjust = 1, vjust = .5), 
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.title = element_blank(), 
+        legend.position = "top", 
+        legend.direction = "horizontal", 
+        legend.box = "vertical") +
+  coord_flip()
+FigS6c$data$features.plot <- factor(gene_info$Gene_Name[match(x = gm$Gene_ID, 
+                                                              table = gene_info$Gene_ID)], 
+                                    levels = rev(gene_info$Gene_Name[match(x = gm$Gene_ID, table = gene_info$Gene_ID)]))
+
+
+# D) UMAP MPP data labelled with predicted basal clusters
+FigS6d <- ggplot(data = pheno_MPP, mapping = aes(x = UMAP_1, y = UMAP_2, color = Predicted_Basal)) +
+  geom_point(size = .3) + 
+  scale_color_d3() + 
+  theme_cowplot() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  ggtitle(label = "") + 
+  xlab(label = "UMAP 1") + 
+  ylab(label = "UMAP 2") + 
+  guides(colour = guide_legend(override.aes = list(size = 2))) 
+
+# E) UMAP MPP data prediction score
+FigS6e <- ggplot(data = pheno_MPP, mapping = aes(x = UMAP_1, y = UMAP_2, color = Max_Prediction_Score)) +
+  geom_point(size = .3) + 
+  scale_color_material("indigo") +
+  theme_cowplot() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  ggtitle(label = "") + 
+  xlab(label = "UMAP 1") + 
+  ylab(label = "UMAP 2") 
+
+# F) Bar plot with number of cells in basal and predicted basal clusters.
+pcc <- data.frame(Treatment = rownames(cell_cluster), cell_cluster)
+pcc <- melt(pcc)
+colnames(pcc)[2:3] <- c("Cluster", "Cells")
+
+FigS6f <- ggplot(data = pcc, mapping = aes(x = Cluster, fill = Treatment, y = Cells)) + 
+  geom_col(position = "dodge") + 
+  theme_cowplot() + 
+  scale_fill_aaas() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_text(size = 8),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) + 
+  geom_text(aes(label = Cells), size = 2.5)
+
+```
+
+```{r figS6pdf}
+
+pdf(file = "./Figures/FigS6_v3.pdf", width = 7, height = 9)
+plot_grid(plot_grid(FigS6a, FigS6d, FigS6e, FigS6f,  
+                    ncol = 1, labels = c("A", "D", "E", "F"), align = "hv", axis = "lrtb"),
+          FigS6b, FigS6c, ncol = 3, labels = c("", "B", "C"))
+dev.off()
+
+# Save as Objects
+saveRDS(object = FigS6a, "./Figures/FigS6a.rds")
+saveRDS(object = FigS6b, "./Figures/FigS6b.rds")
+saveRDS(object = FigS6c, "./Figures/FigS6c.rds")
+saveRDS(object = FigS6d, "./Figures/FigS6d.rds")
+saveRDS(object = FigS6e, "./Figures/FigS6e.rds")
+saveRDS(object = FigS6f, "./Figures/FigS6f.rds")
+
+rm(FigS6a, FigS6b, FigS6c, FigS6d, FigS6e, FigS6f)
+
+```
+
+# Save analysis
+
+```{r}
+
+# Differential expression contrasting sorting status in neuronal populations
+write.table(DEA_pos_neg, file = "./MPPsorted/DEA_pos_neg.csv", sep = ",")
+write.table(DEA_pos_NS, file = "./MPPsorted/DEA_pos_NS.csv", sep = ",")
+write.table(DEA_neg_NS, file = "./MPPsorted/DEA_neg_NS.csv", sep = ",")
+
+
+# Differential expression in response to MPP+ per sorted population of neurons
+write.table(DEA_MPP_basal_positive, file = "./MPPsorted/DEA_MPP_basal_positive.csv", sep = ",")
+write.table(DEA_MPP_basal_negative, file = "./MPPsorted/DEA_MPP_basal_negative.csv", sep = ",")
+write.table(DEA_MPP_basal_NS, file = "./MPPsorted/DEA_MPP_basal_NS.csv", sep = ",")
+
+
+# Cluster markers Basal
+write.table(DEA_basal_b0, file = "./MPPsorted/DEA_basal_b0.csv", sep = ",")
+write.table(DEA_basal_b1, file = "./MPPsorted/DEA_basal_b1.csv", sep = ",")
+write.table(DEA_basal_b2, file = "./MPPsorted/DEA_basal_b2.csv", sep = ",")
+write.table(DEA_basal_b3, file = "./MPPsorted/DEA_basal_b3.csv", sep = ",")
+write.table(DEA_basal_b4, file = "./MPPsorted/DEA_basal_b4.csv", sep = ",")
+write.table(DEA_basal_b5, file = "./MPPsorted/DEA_basal_b5.csv", sep = ",")
+
+
+# Cluster markers MPP
+write.table(DEA_MPP_m0, file = "./MPPsorted/DEA_MPP_m0.csv", sep = ",")
+write.table(DEA_MPP_m1, file = "./MPPsorted/DEA_MPP_m1.csv", sep = ",")
+write.table(DEA_MPP_m2, file = "./MPPsorted/DEA_MPP_m2.csv", sep = ",")
+write.table(DEA_MPP_m3, file = "./MPPsorted/DEA_MPP_m3.csv", sep = ",")
+write.table(DEA_MPP_m4, file = "./MPPsorted/DEA_MPP_m4.csv", sep = ",")
+write.table(DEA_MPP_m5, file = "./MPPsorted/DEA_MPP_m5.csv", sep = ",")
+
+
+
+# Differential expression contrasting sorting status in neuronal populations
+saveRDS(DEA_pos_neg, file = "./MPPsorted/DEA_pos_neg.rds")
+saveRDS(DEA_pos_NS, file = "./MPPsorted/DEA_pos_NS.rds")
+saveRDS(DEA_neg_NS, file = "./MPPsorted/DEA_neg_NS.rds")
+
+# Differential expression in response to MPP+ per sorted population of neurons
+saveRDS(DEA_MPP_basal_positive, file = "./MPPsorted/DEA_MPP_basal_positive.rds")
+saveRDS(DEA_MPP_basal_negative, file = "./MPPsorted/DEA_MPP_basal_negative.rds")
+saveRDS(DEA_MPP_basal_NS, file = "./MPPsorted/DEA_MPP_basal_NS.rds")
+
+# Cluster markers Basal
+saveRDS(DEA_basal_b0, file = "./MPPsorted/DEA_basal_b0.rds")
+saveRDS(DEA_basal_b1, file = "./MPPsorted/DEA_basal_b1.rds")
+saveRDS(DEA_basal_b2, file = "./MPPsorted/DEA_basal_b2.rds")
+saveRDS(DEA_basal_b3, file = "./MPPsorted/DEA_basal_b3.rds")
+saveRDS(DEA_basal_b4, file = "./MPPsorted/DEA_basal_b4.rds")
+saveRDS(DEA_basal_b5, file = "./MPPsorted/DEA_basal_b5.rds")
+
+# Cluster markers MPP
+saveRDS(DEA_MPP_m0, file = "./MPPsorted/DEA_MPP_m0.rds")
+saveRDS(DEA_MPP_m1, file = "./MPPsorted/DEA_MPP_m1.rds")
+saveRDS(DEA_MPP_m2, file = "./MPPsorted/DEA_MPP_m2.rds")
+saveRDS(DEA_MPP_m3, file = "./MPPsorted/DEA_MPP_m3.rds")
+saveRDS(DEA_MPP_m4, file = "./MPPsorted/DEA_MPP_m4.rds")
+saveRDS(DEA_MPP_m5, file = "./MPPsorted/DEA_MPP_m5.rds")
+
+#rm(DEA_basal_b0, DEA_basal_b1, DEA_basal_b2, DEA_basal_b3, DEA_basal_b4, DEA_basal_b5, DEA_basal_b6)
+#rm(DEA_MPP_m0, DEA_MPP_m1, DEA_MPP_m2, DEA_MPP_m3, DEA_MPP_m4, DEA_MPP_m5, DEA_MPP_c6)
+#rm(DEA_MPP_basal_negative, DEA_MPP_basal_negative, DEA_MPP_basal_NS)
+#rm(DEA_pos_neg, DEA_pos_NS, DEA_neg_NS)
+
+```
+
+# Save data
+
+
+```{r}
+
+saveRDS(iDA, file = "./MPPsorted/iDA.Rds")
+saveRDS(iDA_basal, file = "./MPPsorted/iDA_basal.Rds")
+saveRDS(iDA_MPP, file = "./MPPsorted/iDA_MPP.Rds")
+saveRDS(iDA_basal_neu, file = "./MPPsorted/iDA_basal_neu.Rds")
+saveRDS(iDA_both, file = "./MPPsorted/iDA_both.Rds")
+saveRDS(iDA_both_neu, file = "./MPPsorted/iDA_both_neu.Rds")
+
+#rm(iDA, iDA_basal, iDA_basal_neu, iDA_MPP, iDA_both, iDA_both_neu)
+
+```
+
+
