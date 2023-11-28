@@ -3,6 +3,7 @@ A repository of RMarkdown files used to analyze sc-RNA sequencing data from indu
 
 Data availability
 Raw and processed gene expression data has been deposited in GEO:
+
 + Time Course experiment [GSE247600](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE247600)..
 
 To start
@@ -12,6 +13,7 @@ Time Course data
 + Metadata: [GSE247600_TimeCourse_metadata.tsv.gz](https://ftp.ncbi.nlm.nih.gov/geo/series/GSE247nnn/GSE247600/suppl/GSE247600%5FTimeCourse%5Fmetadata.tsv.gz)
   
 + Count data per sample
+
   [GSM7897844_HET1D21_S2_genematrix.csv.gz](https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7897nnn/GSM7897844/suppl/GSM7897844%5FHET1D21%5FS2%5Fgenematrix.csv.gz)
   
   [GSM7897845_HET2D21_S1_genematrix.csv.gz](https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7897nnn/GSM7897845/suppl/GSM7897845%5FHET2D21%5FS1%5Fgenematrix.csv.gz)
@@ -33,7 +35,7 @@ External data used as reference to annotate clusters (human embryonic midbrain /
 
 RMarkdown files
 00_TimeCourse_DataFiltering_DEA.Rmd Filtering, normalization, scaling, clustering, annotation using the hEM as reference, PCA, UMAP, differential expression analysis per time point and per clone.
-
+01_TimeCourse_Velocity_Pseudotime.Rmd RNA velocity analysis and projection into UMAP. Note you will need to download the genematrix files including introns from GEO.
 
 License
 Distributed under the MIT License. See License.txt for more information.
