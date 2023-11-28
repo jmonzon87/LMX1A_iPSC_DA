@@ -1,0 +1,303 @@
+---
+title: "iPSC-DA MPP vs basal: "
+author: "J Monzón Sandoval"
+date: 'Last update: `r date()`'
+output: 
+  html_document:
+    theme: lumen
+    toc: yes
+    number_sections: true
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(cowplot)
+library(ggplot2)
+library(ggsci)
+
+library(stringr)
+library(reshape)
+library(clusterProfiler)
+library(venn)
+
+```
+
+# Data input
+
+```{r}
+
+# Gene annotations 
+gene_info <- read.table(file = "./gene_info.csv", sep = ",", header = TRUE)
+
+# Time course data
+iDA <-readRDS(file = "./TimeCourse/TimeCourse_SeuratObject.rds")
+
+# Sorted basal data
+iDA2 <- readRDS(file = "../iDA_Sorting_MPP/MMPsorted/iDA_basal.Rds")
+
+# Sorted MPP data
+iDA3 <- readRDS(file = "../iDA_Sorting_MPP/MMPsorted/iDA_MPP.Rds")
+
+# Sorted Both
+iDA4 <- readRDS(file = "../iDA_Sorting_MPP/MMPsorted/iDA_both.Rds")
+
+```
+
+# Functions
+
+## Theme
+
+```{r}
+
+# Theme for plots
+cool_theme <- theme(panel.background = element_blank(),
+                    panel.border = element_rect(linewidth = 1, fill = NA),
+                    strip.background = element_rect(fill = "white"),
+                    title = element_text(size = 14),
+                    axis.title = element_text(size = 12),
+                    axis.text = element_text(size = 12),
+                    legend.text = element_text(size = 12),
+                    legend.position = "top",
+                    legend.justification = "center",
+                    legend.direction = "horizontal", 
+                    legend.key = element_blank(),
+                    legend.key.size = unit(4, 'mm'))
+
+```
+
+## Filter and annotate DEA
+
+```{r}
+
+fa_DEA <- function(DEA = DEA, GeneInfo = GeneInfo){
+  DEA <- DEA[which(DEA$p_val_adj < 0.05), ]
+  if (nrow(DEA) > 0){
+    DEA <- data.frame(Gene_ID = rownames(DEA), DEA)
+    DEA <- merge(DEA, GeneInfo, by = "Gene_ID", all.x = TRUE)
+    DEA <- DEA[order(DEA$p_val_adj), ]
+    rownames(DEA) <- 1:nrow(DEA)
+  }
+  else{
+    DEA <- "No DEGs at adj < 0.05"
+  }
+  return(DEA)
+} 
+
+
+```
+
+# Proportion of cells per clusters (basal and MPP).
+
+```{r}
+
+# Merge
+Basal_clusters <- iDA2$seurat_clusters
+
+Prediction_Basal <- iDA3$Predicted_Basal
+Prediction_Basal <- paste(Prediction_Basal, "i", sep = "_")
+names(Prediction_Basal) <- names(iDA3$Predicted_Basal)
+
+bp <- c(as.character(Basal_clusters), as.character(Prediction_Basal))
+names(bp) <- c(names(Basal_clusters), names(Prediction_Basal))
+
+iDA4 <- AddMetaData(object = iDA4, metadata = bp, col.name = "Basal_Predicted")
+rm(bp)
+   
+```
+
+# Including basal prediction in whole dataset
+
+```{r}
+
+d2p <- as.matrix(table(iDA4@meta.data[, c("Basal_Predicted", "BFP")]))
+d2p <- melt(d2p)
+
+d2p_basal <- d2p[str_detect(string = d2p$Basal_Predicted, pattern = "_i", negate = TRUE), ]
+d2p_basal <- data.frame(d2p_basal, percent = - d2p_basal$value *100 / sum(d2p_basal$value))
+d2p_mpp <- d2p[str_detect(string = d2p$Basal_Predicted, pattern = "_i", negate = FALSE), ]
+d2p_mpp <- data.frame(d2p_mpp, percent = d2p_mpp$value *100 / sum(d2p_mpp$value))
+
+d2p <- rbind(d2p_basal, d2p_mpp)
+rm(d2p_basal, d2p_mpp)
+
+treatment <- as.character(d2p$Basal_Predicted)
+treatment[str_detect(string = treatment, pattern = "_i", negate = TRUE)] <- "Basal"
+treatment[str_detect(string = treatment, pattern = "_i")] <- "MPP"
+
+d2p <- data.frame(d2p, Treatment = treatment)
+d2p <- data.frame(d2p, Treatment_Sorted = paste(d2p$Treatment, d2p$BFP, sep = "_"))
+
+
+d2p$Treatment_Sorted <- factor(d2p$Treatment_Sorted, 
+                               levels = c("Basal_positive", "Basal_negative", "Basal_NS",
+                                          "MPP_positive", "MPP_negative", "MPP_NS"))
+
+d2p$Basal_Predicted <- str_replace(as.character(d2p$Basal_Predicted), "_i", "")
+
+d2p$Basal_Predicted <- factor(x = d2p$Basal_Predicted, levels = rev(unique(d2p$Basal_Predicted)))
+
+# Selected colour
+colores <- c(pal_jco()(3), pal_jco(alpha = .5)(3))
+
+g1 <- ggplot(data = d2p, mapping = aes(x = percent, 
+                                       y = Basal_Predicted, 
+                                       fill = Treatment_Sorted)) + 
+  geom_col() + scale_fill_manual(values = colores) + xlim(-40, 40) + 
+  geom_vline(xintercept = 0, size = 1) + theme_classic()
+
+g1
+
+rm(g1, colores)
+
+```
+
+# Differental expression  
+
++ Between B3 basal and B3 MPP+ predicted populations.
+
+```{r}
+
+Idents(iDA4) <- iDA4$Basal_Predicted
+
+DEA_MPP_Basal_B3 <- FindMarkers(object = iDA4, ident.1 = "B3_i", ident.2 = "B3")
+DEA_MPP_Basal_B3 <- fa_DEA(DEA = DEA_MPP_Basal_B3, GeneInfo = gene_info)
+
+```
+
+## DEGs by direction of change
+
+```{r}
+
+DEG_MPP_basal_B3_up <- DEA_MPP_Basal_B3$Gene_ID[which(DEA_MPP_Basal_B3$avg_log2FC > 0)]
+DEG_MPP_basal_B3_down <- DEA_MPP_Basal_B3$Gene_ID[which(DEA_MPP_Basal_B3$avg_log2FC < 0)]
+
+```
+
+## GO analysis per cluster
+
+### BP
+
+```{r}
+
+# Gene ontology among DEG
+bg <- rownames(iDA4)
+
+DEGs <- ls(pattern = "^DEG_")
+
+for(i in 1:length(DEGs)){
+  dei <- get(DEGs[i])
+  if(length(dei) > 2){
+    # Enrichment analysis
+    goi <- enrichGO(gene = dei,
+                    keyType = "ENSEMBL",
+                    OrgDb = "org.Hs.eg.db",
+                    ont = "BP",
+                    universe = bg,
+                    pAdjustMethod = "BH",
+                    pvalueCutoff = 0.05)
+    assign(x = paste("GOR_BP", DEGs[i], sep = "_"), value = goi)
+    rm(dei, goi)
+  }
+}
+
+rm(i)
+
+```
+
+```{r fig.height=7, fig.width=7}
+
+g3_up <- dotplot(object = GOR_BP_DEG_MPP_basal_B3_up) + 
+  theme(axis.text.x = element_text(size = 8), 
+        axis.text.y = element_text(size = 8)) + xlim(0,.35)
+
+g3_up
+rm(g3_up)
+
+```
+
+```{r fig.height=20, fig.width=7}
+
+g3_up <- dotplot(object = GOR_BP_DEG_MPP_basal_B3_up, showCategory = 50) + 
+  theme(axis.text.x = element_text(size = 5), 
+        axis.text.y = element_text(size = 5)) 
+
+g3_up
+rm(g3_up)
+
+```
+
+```{r fig.height=7, fig.width=7}
+
+g3_down <- dotplot(object = GOR_BP_DEG_MPP_basal_B3_down) + 
+  theme(axis.text.x = element_text(size = 8), 
+        axis.text.y = element_text(size = 8)) + xlim(0,.35)
+
+g3_down
+
+rm(g3_down)
+
+```
+
+```{r fig.height=20, fig.width=7}
+
+g3_down <- dotplot(object = GOR_BP_DEG_MPP_basal_B3_down, showCategory = 50) + 
+  theme(axis.text.x = element_text(size = 5), 
+        axis.text.y = element_text(size = 5)) 
+
+g3_down
+rm(g3_down)
+
+```
+
+### Annotate GOs
+
+```{r}
+
+n_g3_up <- setReadable(GOR_BP_DEG_MPP_basal_B3_up, 'org.Hs.eg.db', 'ENSEMBL')
+n_g3_down <- setReadable(GOR_BP_DEG_MPP_basal_B3_down, 'org.Hs.eg.db', 'ENSEMBL')
+
+cnetplot(x = n_g3_up)
+cnetplot(x = n_g3_down)
+
+```
+
+## Fig5 panel I and J.
+
+```{r fig.height=5, fig.width=5.8}
+
+gup <- barplot(n_g3_up, showCategory = 10) + cool_theme + 
+  theme(aspect.ratio = 3,
+        axis.text.x = element_text(size = 8), 
+        axis.text.y = element_text(size = 7), 
+        legend.position = "bottom", 
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 6, angle = 315, hjust = 0, vjust = 1))
+
+gdo <- barplot(n_g3_down, showCategory = 10) + cool_theme + 
+  theme(aspect.ratio = 3,
+        axis.text.x = element_text(size = 8), 
+        axis.text.y = element_text(size = 7),
+        legend.position = "bottom", 
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 6, angle = 315, hjust = 0, vjust = 1))
+
+#pdf(file = "Fig5IJ.pdf", width = 5.8, height = 5)
+plot_grid(gup, gdo, ncol = 2, labels = c("I", "J"), align = "hv", axis = "btrl")
+#dev.off()
+
+```
+
+# Save DEA and GOR
+
+```{r}
+
+write.table(x = DEA_MPP_Basal_B3, file = "./DEA_MPP_Basal_B3.tsv", sep = "\t", quote = FALSE)
+write.table(x = n_g3_up@result, file = "./GOR_MPP_Basal_B3_UP.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+write.table(x = n_g3_down@result, file = "./GOR_MPP_Basal_B3_DOWN.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+
+```
