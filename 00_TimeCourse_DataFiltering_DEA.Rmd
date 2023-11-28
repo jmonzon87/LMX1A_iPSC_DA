@@ -1,0 +1,1275 @@
+---
+title: "Filtering dataset and DEA iPSC-DA time course"
+author: "J Monzón Sandoval"
+date: 'Last update: `r date()`'
+output: 
+  html_document:
+    theme: lumen
+    toc: yes
+    number_sections: true
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE)
+
+library(Seurat)
+library(scater)
+#library(ouija)
+
+library(stringr)
+library(ggplot2)
+library(ggsci)
+library(cowplot)
+library(MetBrewer)
+library(RColorBrewer)
+
+library(corrgram)
+library(venn)
+library(reshape)
+library(pheatmap)
+
+```
+
+# Gene expression data
+
+```{r GeneExpression}
+
+# Gene_ID	Gene_Name	Gene_Biotype	Gene_Length # Columns in gene info tab 
+# ensembl annotations release 99
+gene_info <- read.table("./05_MappaAnalyzer_BFP/HET1D21_S2/gene_info.csv", 
+                        sep = ",", header = TRUE, stringsAsFactors = FALSE)
+
+# All data matrices
+fn <- list.files(path = "./05_MappaAnalyzer_BFP", 
+                 pattern = "_genematrix.csv", 
+                 recursive = TRUE, full.names = TRUE)
+fn <- fn[str_detect(string = fn, pattern = "_incl_introns_", 
+                    negate = TRUE)] # change to FALSE to include introns
+
+# Need to combine counts from the different samples
+t1 <- read.table(file = fn[1], sep = ",", header = TRUE, row.names = 1)
+
+for (i in c(2:length(fn))){
+  ti <- read.table(file = fn[i], sep = ",", header = TRUE, row.names = 1)
+  t1 <- cbind(t1, ti)
+}
+
+ged <- t1
+rm(i, t1, ti, fn)
+
+ged <- as.matrix(ged)
+
+```
+
+```{r PhenoPart1}
+
+# Phenotype data 
+
+# Mappa Stats
+pheno <- read.table("./06_Pheno/Pheno_MappaStats_L1234.txt", sep = "\t", stringsAsFactors = FALSE, header = TRUE)
+
+# Phenotype
+Clone <- vector()
+Clone[str_detect(pheno$Sample, "HET1")] <- "L25"
+Clone[str_detect(pheno$Sample, "HET2")] <- "L35"
+
+Day <- vector()
+Day[str_detect(pheno$Sample, "D21")] <- "D21"
+Day[str_detect(pheno$Sample, "D30")] <- "D30"
+Day[str_detect(pheno$Sample, "D45")] <- "D45"
+Day[str_detect(pheno$Sample, "D65")] <- "D65"
+
+Control <- vector()
+Control[str_detect(pheno$Sample, "Neg_Ctrl")] <- "Neg_Ctrl"
+Control[str_detect(pheno$Sample, "Pos_Ctrl")] <- "Pos_Ctrl"
+
+Protocol <- rep("WHOLE", length = nrow(pheno))
+Protocol[str_detect(pheno$Sample, "NUCLEI")] <- "NUCLEI"
+Protocol[str_detect(pheno$Sample, "Neg_Ctrl")] <- "Neg_Ctrl"
+Protocol[str_detect(pheno$Sample, "Pos_Ctrl")] <- "Pos_Ctrl"
+
+pheno <- data.frame(pheno[, 1:2], 
+                    Clone  = Clone, 
+                    Day = Day,
+                    Control = Control,
+                    Protocol = Protocol, 
+                    Percent_Mapped = pheno$Mapped_Reads * 100 / pheno$Barcoded_Reads, 
+                    Percent_Multimapped_Reads = pheno$Multimapped_Reads * 100 / pheno$Mapped_Reads,
+                    Percent_Uniquely_Mapped = pheno$Uniquely_Mapped_Reads * 100 / pheno$Mapped_Reads,
+                    Percent_Exon_Reads = pheno$Exon_Reads * 100 / pheno$Uniquely_Mapped,
+                    Percent_Ambiguous_Exon_Reads = pheno$Ambiguous_Exon_Reads * 100 / pheno$Uniquely_Mapped,
+                    Percent_Intron_Reads = pheno$Intron_Reads * 100 / pheno$Uniquely_Mapped,
+                    Percent_Ambiguous_Intron_Reads = pheno$Ambiguous_Intron_Reads * 100 / pheno$Uniquely_Mapped,
+                    Percent_Intergenic_Reads = pheno$Intergenic_Reads * 100 / pheno$Uniquely_Mapped,
+                    Percent_Mitochondrial_Reads = pheno$Mitochondrial_Reads * 100 / pheno$Uniquely_Mapped,
+                    Percent_Ribosomal_Reads = pheno$Ribosomal_Reads * 100 / pheno$Uniquely_Mapped,
+                    pheno[, 3:ncol(pheno)])
+
+rm(Day, Control, Clone, Protocol)
+
+```
+
+```{r PhenoPart2}
+
+# Feature annotation and counts only for Protein Coding genes
+fd <- gene_info[which(gene_info$Gene_Biotype == "protein_coding"), ]
+rownames(fd) <- fd$Gene_ID
+pc_genes <- rownames(fd)
+pc_counts <- ged[pc_genes, ]
+
+# Rearrange order of gene expression data to pheno
+ged <- ged[, pheno$Barcode]
+
+# single cell object
+sce <- SingleCellExperiment(assays = list(counts = pc_counts),
+                            colData = pheno)
+
+rowData(sce) <- fd
+
+# Calculate QC for cells
+QCcells <- perCellQCMetrics(sce, percent_top = c(10, 20, 50, 100)) 
+
+# Normalize data 
+cpm(sce) <- calculateCPM(sce)
+tpm(sce) <- calculateTPM(sce, lengths = rowData(sce)[, "Gene_Length"])
+
+# Add QC for cells and number of genes detected to colData
+genes_detected_1TPM <- apply(X = tpm(sce), MARGIN = 2, FUN = function(x) length(which(x >= 1)))
+genes_detected_5TPM <- apply(X = tpm(sce), MARGIN = 2, FUN = function(x) length(which(x >= 5)))
+genes_detected_1cnt <- apply(X = counts(sce), MARGIN = 2, FUN = function(x) length(which(x >= 1)))
+genes_detected_5cnt <- apply(X = counts(sce), MARGIN = 2, FUN = function(x) length(which(x >= 5)))
+
+colData(sce) <- cbind(colData(sce), QCcells)
+colData(sce) <- cbind(colData(sce), data.frame(genes_detected_1TPM = genes_detected_1TPM,
+                                               genes_detected_5TPM = genes_detected_5TPM, 
+                                               genes_detected_1cnt = genes_detected_1cnt,
+                                               genes_detected_5cnt = genes_detected_5cnt))
+
+
+rm(fd, QCcells)
+rm(genes_detected_1TPM, genes_detected_5TPM, genes_detected_1cnt, genes_detected_5cnt)
+
+# Cell pheno data
+pheno <- as.data.frame(colData(sce), row.names = sce$Barcode)
+
+rm(sce)
+
+```
+
++ Total features: `r nrow(ged)`.
+
++ Total number of barcodes `r ncol(ged)`.
+
+# Data filtering
+
+## Protein coding genes
+
+```{r}
+
+# Seurat object
+iDA <- CreateSeuratObject(counts = pc_counts, meta.data = pheno, project = "TimeCourse", min.cells = 0, min.features = 0)
+
+rm(ged, pc_counts, pc_genes)
+
+```
+
++ Total features: `r nrow(iDA)` .
+
++ Total number of barcodes `r ncol(iDA)`.
+
+## Filtering cells 
+
+### Cells with low number of genes detected.
+
+```{r fig.height=3, fig.width=4}
+
+mingenes <- 2000
+
+plot(density(pheno$genes_detected_1cnt), main = "Genes detected (1 count)")
+abline( v = mingenes, col = "red", lty = 2)
+text(x = mingenes, y = 0.00010, labels = paste(mingenes, "genes"), srt = 90, pos = 2)
+
+```
+
+```{r}
+
+cat("\n + Barcodes per sample: \n")
+table(pheno$Sample)
+cat("\n")
+
+cat("\n + Barcodes per sample with < ", mingenes, "genes detected: \n")
+table(pheno$Sample[which(pheno$genes_detected_1cnt < mingenes)])
+cat("\n")
+
+cat("\n + Barcodes per sample with > ", mingenes, "genes detected: \n")
+table(pheno$Sample[which(pheno$genes_detected_1cnt > mingenes)])
+cat("\n")
+
+iDA <- subset(x = iDA, cells = pheno$Barcode[which(pheno$genes_detected_1cnt > mingenes)])
+
+rm(mingenes)
+
+```
+
++ Total features: `r nrow(iDA)` .
+
++ Total number of barcodes `r ncol(iDA)`.
+
+### Internal controls
+
+```{r}
+
+cat("+ We furhter removed", length(which(iDA$Sample == "Neg_Ctrl")), " Neg_Ctrl samples \n")
+cat("+ We furhter removed", length(which(iDA$Sample == "Pos_Ctrl")), " Pos_Ctrl samples \n")
+
+iDA <- subset(x = iDA, cells = iDA$Barcode[!(iDA$Sample == "Neg_Ctrl")])
+iDA <- subset(x = iDA, cells = iDA$Barcode[!(iDA$Sample == "Pos_Ctrl")])
+
+```
+
++ Total features: `r nrow(iDA)` .
+
++ Total number of barcodes `r ncol(iDA)`.
+
+### Single nuclei at D45
+
+```{r}
+
+cat("+ We furhter removed", length(which(iDA$Sample == "HET1D45NUCLEI")), " HET1D45NUCLEI samples \n")
+
+iDA <- subset(x = iDA, cells = iDA$Barcode[!(iDA$Sample == "HET1D45NUCLEI")])
+
+```
+
+
+### Cells with high % of mitochondrial reads
+
+```{r}
+
+cat("+ We furhter removed", length(which(iDA$Percent_Mitochondrial_Reads > 20)), 
+    "cell with high % of mitochondrial reads (> 20%) \n")
+
+iDA <- subset(x = iDA, cells = iDA$Barcode[!(iDA$Percent_Mitochondrial_Reads > 20)])
+
+cat("At the end", sum(table(iDA$Sample)), "cells remained:\t")
+table(iDA$Sample)
+
+```
+
++ Total features: `r nrow(iDA)` .
+
++ Total number of barcodes `r ncol(iDA)`.
+
+
+## Filtering genes
+
+## Genes consistently expressed across cells
+
+```{r warning=FALSE}
+
+cells_nonzero <- apply(X = iDA[["RNA"]]@counts, MARGIN = 1, FUN = function(x) length(which(x != 0)))
+cells_above1 <- apply(X = iDA[["RNA"]]@counts, MARGIN = 1, FUN = function(x) length(which(x > 1)))
+cells_above5 <- apply(X = iDA[["RNA"]]@counts, MARGIN = 1, FUN = function(x) length(which(x > 5)))
+cells_above10 <- apply(X = iDA[["RNA"]]@counts, MARGIN = 1, FUN = function(x) length(which(x > 10)))
+
+output <- matrix(NA, nrow = 4, ncol = 100, 
+                 dimnames = list(c("Non zero counts", "More than 1 count", 
+                                   "More than 5 counts", "More than 10 counts"), 
+                                 seq(.01, 1, .01)))
+
+percent_cells <- seq(.01, 1, .01)
+
+for(i in c(1:100)){
+  output[1, i] <- length(which(cells_nonzero > ncol(iDA) * percent_cells[i]))
+  output[2, i] <- length(which(cells_above1 > ncol(iDA) * percent_cells[i]))
+  output[3, i] <- length(which(cells_above5 > ncol(iDA) * percent_cells[i]))
+  output[4, i] <- length(which(cells_above10 > ncol(iDA) * percent_cells[i]))
+  
+}
+
+rm(i, percent_cells)
+
+output <- melt(output)
+colnames(output) <- c("Counts", "Fractions_Of_cells", "Genes")
+
+```
+
+
+```{r fig.width=5.5, fig.height=3.5}
+
+g1 <- ggplot(data = output, mapping = aes(x = Fractions_Of_cells, y = Genes, color = Counts)) + 
+  geom_point(size = 1) + 
+  scale_color_lancet() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) 
+
+g1 
+
+rm(g1, output)
+
+```
+
+## Filter lowly expressed genes
+
++ Keep genes with more than 1 count in at least 5 percent of the filtered cells.
+
+```{r}
+
+#keep_genes <- rownames(iDA)[which(cells_nonzero >= (ncol(iDA) * .1))]
+keep_genes <- rownames(iDA)[which(cells_above1 >= (ncol(iDA) * .05))]
+iDA <- subset(x = iDA, features = keep_genes)
+
+rm(cells_above1, cells_above10, cells_above5, cells_nonzero)
+rm(keep_genes)
+
+```
+
++ Total features: `r nrow(iDA)` .
+
++ Total number of barcodes `r ncol(iDA)`.
+
+
+# Analysis 
+
+## Normalization and clustering 
+
++ Carried out in all filtered cells.
+
++ Normalization LogNormalize (scale factor 1e6).
+
++ PCA based on the top 5000 most variable features.
+
++ UMAP based on top 10 PCS.
+
+
+```{r fig.height=3, fig.width=4}
+
+iDA <- NormalizeData(iDA, normalization.method = "LogNormalize", scale.factor = 1e6)
+iDA <- FindVariableFeatures(iDA, selection.method = "vst", nfeatures = 5000)
+all_genes <- rownames(iDA)
+
+# Scale on all data run PC in top 5000 most variable features
+iDA <- ScaleData(iDA, features = all_genes)
+iDA <- RunPCA(iDA, features = VariableFeatures(object = iDA), verbose = FALSE)
+# Elbow plot
+barplot(iDA@reductions$pca@stdev[1:20], xlab = "PC", ylab = "Standard Deviation", 
+        names.arg = 1:20, las = 2, col = grey.colors(20))
+
+# Cell cycle score
+s_genes <- gene_info$Gene_ID[match(cc.genes$s.genes, table = gene_info$Gene_Name)]
+g2m_genes <- gene_info$Gene_ID[match(cc.genes$g2m.genes, table = gene_info$Gene_Name)]
+s_genes <- intersect(rownames(iDA), s_genes)
+g2m_genes <- intersect(rownames(iDA), g2m_genes)
+iDA <- CellCycleScoring(iDA, s.features = s_genes, g2m.features = g2m_genes, set.ident = FALSE)
+rm(g2m_genes, s_genes)
+
+# UMAP and cell clustering 
+iDA <- RunUMAP(iDA, reduction = "pca", dims = 1:10)
+iDA <- FindNeighbors(iDA, dims = 1:10)
+iDA <- FindClusters(iDA, resolution = 0.5)
+
+# Threshold for DEGs
+cut_adjp <- 0.05
+
+```
+
+## Differential expression by Day
+
++ Differential expression analysis (DEA) based on Wilcox test (lfc > 0.25 and adjusted p value 0.05).
+
+
+```{r DEGsDay}
+
+# Differential expression analysis by Day
+
+Idents(object = iDA) <- iDA$Day
+
+DEA_Day30_Day21 <- FindMarkers(object = iDA, ident.1 = "D30", ident.2 = "D21",
+                               logfc.threshold = 0.25, test.use = "wilcox")
+
+DEA_Day45_Day30 <- FindMarkers(object = iDA, ident.1 = "D45", ident.2 = "D30",
+                               logfc.threshold = 0.25, test.use = "wilcox")
+
+DEA_Day65_Day45 <- FindMarkers(object = iDA, ident.1 = "D65", ident.2 = "D45",
+                               logfc.threshold = 0.25, test.use = "wilcox")
+
+DEA_Day30_Day21 <- DEA_Day30_Day21[which(DEA_Day30_Day21$p_val_adj < cut_adjp), ]
+DEA_Day45_Day30 <- DEA_Day45_Day30[which(DEA_Day45_Day30$p_val_adj < cut_adjp), ]
+DEA_Day65_Day45 <- DEA_Day65_Day45[which(DEA_Day65_Day45$p_val_adj < cut_adjp), ]
+  
+# Number of DEGs by Day
+nDEG_Day <- c(nrow(DEA_Day30_Day21), nrow(DEA_Day45_Day30), nrow(DEA_Day65_Day45))
+nDEG_Day <- data.frame(Comparison = c("D30_vs_D21", "D45_vs_D30", "D65_vs_D45"), DEG = nDEG_Day)
+
+# Add gene names to DEA 
+DEA_Day30_Day21 <- data.frame(DEA_Day30_Day21, Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_Day30_Day21), table = gene_info$Gene_ID)])
+DEA_Day45_Day30 <- data.frame(DEA_Day45_Day30, Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_Day45_Day30), table = gene_info$Gene_ID)])
+DEA_Day65_Day45 <- data.frame(DEA_Day65_Day45, Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_Day65_Day45), table = gene_info$Gene_ID)])
+
+```
+
+## Differential expression by Clone
+
++ Differential expression analysis (DEA) based on Wilcox test (lfc > 0.25 and adjusted p value 0.05).
+
+```{r DEAClone}
+
+# Differentially expressed by Clone 
+Idents(object = iDA) <- iDA$Clone
+
+DEA_Clone <- FindMarkers(object = iDA, ident.1 = "L25", ident.2 = "L35", 
+                         logfc.threshold = 0.25, test.use = "wilcox")
+DEA_Clone <- DEA_Clone[which(DEA_Clone$p_val_adj < cut_adjp), ]
+
+
+# Number of DEG by Clone
+nDEG_Clone <- c(nrow(DEA_Clone))
+
+nDEG_Clone <- data.frame(Comparison = "L35_vs_L25",
+                         DEG = nDEG_Clone)
+
+# Add gene names to DEA 
+DEA_Clone <- data.frame(DEA_Clone, Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_Clone), table = gene_info$Gene_ID)])
+
+```
+
+## Cluster gene markers
+
++ Gene markers per cluster (lfc > 0.25, adjusted p value < 0.05 and only positive true).
+
+```{r DEACluster}
+
+# Differential expression analysis: cluster markers # 
+
+Idents(object = iDA) <- iDA$seurat_clusters
+
+DEA_c0 <- FindMarkers(object = iDA, ident.1 = "0",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_c1 <- FindMarkers(object = iDA, ident.1 = "1",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_c2 <- FindMarkers(object = iDA, ident.1 = "2",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_c3 <- FindMarkers(object = iDA, ident.1 = "3",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_c4 <- FindMarkers(object = iDA, ident.1 = "4",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_c5 <- FindMarkers(object = iDA, ident.1 = "5",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_c6 <- FindMarkers(object = iDA, ident.1 = "6",
+                      logfc.threshold = 0.25, test.use = "wilcox", 
+                      only.pos = TRUE)
+
+DEA_c0 <- DEA_c0[which(DEA_c0$p_val_adj < cut_adjp), ]
+DEA_c1 <- DEA_c1[which(DEA_c1$p_val_adj < cut_adjp), ]
+DEA_c2 <- DEA_c2[which(DEA_c2$p_val_adj < cut_adjp), ]
+DEA_c3 <- DEA_c3[which(DEA_c3$p_val_adj < cut_adjp), ]
+DEA_c4 <- DEA_c4[which(DEA_c4$p_val_adj < cut_adjp), ]
+DEA_c5 <- DEA_c5[which(DEA_c5$p_val_adj < cut_adjp), ]
+DEA_c6 <- DEA_c6[which(DEA_c6$p_val_adj < cut_adjp), ]
+
+# Add gene names to DEA
+DEA_c0 <- data.frame(DEA_c0, Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_c0), table = gene_info$Gene_ID)])
+DEA_c1 <- data.frame(DEA_c1, Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_c1), table = gene_info$Gene_ID)])
+DEA_c2 <- data.frame(DEA_c2, Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_c2), table = gene_info$Gene_ID)])
+DEA_c3 <- data.frame(DEA_c3, Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_c3), table = gene_info$Gene_ID)])
+DEA_c4 <- data.frame(DEA_c4, Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_c4), table = gene_info$Gene_ID)])
+DEA_c5 <- data.frame(DEA_c5, Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_c5), table = gene_info$Gene_ID)])
+DEA_c6 <- data.frame(DEA_c6, Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_c6), table = gene_info$Gene_ID)])
+
+# Number of DEGs per Cluster
+nDEG_Cluster <- c(nrow(DEA_c0), nrow(DEA_c1), nrow(DEA_c2),
+                  nrow(DEA_c3), nrow(DEA_c4), nrow(DEA_c5),
+                  nrow(DEA_c6))
+
+nDEG_Cluster <- data.frame(Cluster = as.character(seq(0, 6)), #
+                           DEG = nDEG_Cluster)
+
+# Top DEGs by Cluster
+DEGs_Cluster_top <- unique(c(head(rownames(DEA_c0), 10), head(rownames(DEA_c1), 10),
+                             head(rownames(DEA_c2), 10), head(rownames(DEA_c3), 10),
+                             head(rownames(DEA_c4), 10), head(rownames(DEA_c5), 10),
+                             head(rownames(DEA_c6), 10)))
+
+
+```
+
+## Known cell type markers
+
+```{r genemarkers}
+
+# Cell type markers
+gm <- read.table("./06_Pheno/CellType_Markers_Subset2.txt", sep = "\t", header = TRUE)
+gm <- data.frame(gm, Gene_ID = gene_info$Gene_ID[match(gm$Gene_Name, gene_info$Gene_Name)])
+
+cat("Markers not found in filtered data:", gm$Gene_Name[!(gm$Gene_ID %in% all_genes)],"\n")
+
+gm <- gm[gm$Gene_ID %in% all_genes, ]
+gm$Gene_ID <- factor(gm$Gene_ID, levels = gm$Gene_ID) 
+
+```
+
+## Overlap cluster markers with cell type markers
+
+```{r celltypeannot, results='asis'}
+
+# Overlap of cluster markers with cell type markers
+cat("\n\n\ + Overlap with cluster 0 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_c0),]
+cat("\n\n\ + Overlap with cluster 1 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_c1),]
+cat("\n\n\ + Overlap with cluster 2 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_c2),]
+cat("\n\n\ + Overlap with cluster 3 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_c3),]
+cat("\n\n\ + Overlap with cluster 4 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_c4),]
+cat("\n\n\ + Overlap with cluster 5 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_c5),]
+cat("\n\n\ + Overlap with cluster 6 markers: \n")
+gm[gm$Gene_ID %in% rownames(DEA_c6),]
+
+```
+
+## human Embryonic Midbrain (hEM)
+
++ Data obtained from GEO [GSE76381](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE76381).
+
+```{r hmref}
+
+# Human midbrain dataset (for reference)
+# Pheno data for cell, including cell type and time points
+hm_pheno <- read.table("../iPSC_DA_comparison/04_ExternalData/RNAseq_data/GSE76381_EmbryoMoleculeCounts.cef.txt", 
+                            header = FALSE, sep = "\t", nrows = 3, stringsAsFactors = TRUE, skip = 1)
+
+hm_pheno <- hm_pheno[, -1]
+rownames(hm_pheno) <- hm_pheno$V2
+hm_pheno <- hm_pheno[, -1]
+hm_pheno <- t(hm_pheno)
+hm_pheno <- as.data.frame(hm_pheno)
+
+hm_celltypes <- read.table("../iPSC_DA_comparison/04_ExternalData/RNAseq_data/GSE76381_EmbryoMoleculeCounts.CelltypeDescription.txt", 
+                           sep = "\t", header = TRUE)
+
+hm_pheno <- data.frame(hm_pheno, 
+                       cell_type = hm_celltypes$cell_type_lv1[match(hm_pheno$Cell_type,
+                                                                        table = hm_celltypes$cell_type)],
+                       row.names = hm_pheno$Cell_ID)
+
+# table(colnames(hm_counts) == rownames(hm_pheno))
+
+
+# La Manno 2016 counts
+hm_counts <- read.table("../iPSC_DA_comparison/04_ExternalData/RNAseq_data/GSE76381_EmbryoMoleculeCounts.cef.txt", 
+                            header = FALSE, sep = "\t", skip = 5, row.names = 1)
+hm_counts <- hm_counts[, -1] # Empty column 
+colnames(hm_counts) <- hm_pheno$Cell_ID
+
+hm <- CreateSeuratObject(counts = hm_counts, meta.data = hm_pheno, 
+                         project = "HumanMidbrain", min.cells = 0, min.features = 0)
+
+rm(hm_counts, hm_pheno, hm_celltypes)
+
+```
+
++ Subset progenitors, neuroblast and dopaminergic neurons.
+
++ Use common features with our dataset for integration.
+
+```{r hmfilt}
+
+# Filter out endothelial, pericytes, microglia, OMTN, red nucleus, gabaergic, serotonergic, OPC, radial glia, and unknown cells from hm
+hm <- subset(x = hm, cells = hm$Cell_ID[hm$cell_type != "endothelial"])
+hm <- subset(x = hm, cells = hm$Cell_ID[hm$cell_type != "pericytes"])
+hm <- subset(x = hm, cells = hm$Cell_ID[hm$cell_type != "microglia"])
+hm <- subset(x = hm, cells = hm$Cell_ID[hm$cell_type != "OMTN"])
+hm <- subset(x = hm, cells = hm$Cell_ID[hm$cell_type != "red nucleus"])
+hm <- subset(x = hm, cells = hm$Cell_ID[hm$cell_type != "gabaergic"])
+hm <- subset(x = hm, cells = hm$Cell_ID[hm$cell_type != "serotonergic"])
+hm <- subset(x = hm, cells = hm$Cell_ID[hm$cell_type != "OPC"])
+hm <- subset(x = hm, cells = hm$Cell_ID[hm$cell_type != "unknown"])
+hm <- subset(x = hm, cells = hm$Cell_ID[hm$cell_type != "radial glia"])
+
+# Common background set of genes shared between datasets
+hm_bg <- rownames(hm)
+
+tomap  <- gene_info[gene_info$Gene_ID %in% rownames(iDA), ]
+rownames(tomap) <- 1:nrow(tomap)
+if(length(which(duplicated(tomap$Gene_Name) == TRUE)) > 0 ) {
+  dps <- tomap$Gene_Name[which(duplicated(x = tomap$Gene_Name) == TRUE)]
+  tomap <- tomap[(!tomap$Gene_Name %in% dps), ]
+  rm(dps)
+}
+
+bg <- intersect(hm_bg, tomap$Gene_Name) # # length(bg) # 12309
+bg_ens <- tomap$Gene_ID[match(bg, table = tomap$Gene_Name)]
+
+# subset Human midbrain datasets
+hm <- subset(x = hm, features = bg)
+hm_counts <- hm@assays$RNA@counts
+rownames(hm_counts) <- tomap$Gene_ID[match(x = rownames(hm_counts), table = tomap$Gene_Name)]
+hm_pheno <- hm@meta.data
+rm(hm)
+
+hm <- CreateSeuratObject(counts = hm_counts, meta.data = hm_pheno,
+                         project = "HumanMidbrain", min.cells = 0, min.features = 0)
+rm(hm_counts, hm_pheno)
+
+# subset counts from iPSC dataset
+iDAs <- subset(iDA, features = bg_ens)
+iDAs_counts <- iDAs@assays$RNA@counts
+iDAs_pheno <- iDAs@meta.data
+rm(iDAs)
+
+iDAs <- CreateSeuratObject(counts = iDAs_counts, meta.data = iDAs_pheno,
+                         project = "TimeCourse", min.cells = 0, min.features = 0)
+rm(iDAs_counts, iDAs_pheno)
+
+# Seurat Object list of both human midbrain and iPSC differentiation into DA neurons
+so_list <- list(HumanMidbrain = hm, iPSCTimeCourse = iDAs)
+rm(hm, iDAs)
+
+rm(hm_bg, bg, bg_ens, tomap)
+
+```
+
++ Annotate our iPSC to DA differentiation time course data using the hEM as reference.
+
+```{r hmlabelt}
+
+# Label transfer from neuroblast, neuronal progenitors and Dopaminergic neurons
+
+for (i in 1:length(so_list)) {
+    so_list[[i]] <- NormalizeData(so_list[[i]], normalization.method = "LogNormalize", scale.factor = 1e6)
+    so_list[[i]] <- FindVariableFeatures(so_list[[i]], selection.method = "vst", nfeatures = 5000, verbose = FALSE)
+    so_list[[i]] <- ScaleData(so_list[[i]], features = all_genes)
+    so_list[[i]] <- RunPCA(so_list[[i]], features = VariableFeatures(object = so_list[[i]]), verbose = FALSE)
+    so_list[[i]] <- RunUMAP(so_list[[i]], reduction = "pca", dims = 1:10)
+}
+rm(i)
+
+#data_anchors <- FindIntegrationAnchors(object.list = so_list, dims = 1:10)
+#integrated_data <- IntegrateData(anchorset = data_anchors, new.assay.name = "both")
+
+tranf_anchors <- FindTransferAnchors(reference = so_list[["HumanMidbrain"]], 
+                                     query = so_list[["iPSCTimeCourse"]], 
+                                     dims = 1:10, reference.reduction = "pca")
+
+predictions <- TransferData(anchorset = tranf_anchors, 
+                            refdata = so_list[["HumanMidbrain"]]$cell_type, 
+                            dims = 1:10)
+
+iDA <- AddMetaData(object = iDA, 
+                   metadata = predictions$predicted.id, 
+                   col.name = "Predicted")
+iDA <- AddMetaData(object = iDA, 
+                   metadata = predictions$prediction.score.dopaminergic, 
+                   col.name = "PS_dopaminergic")
+iDA <- AddMetaData(object = iDA, metadata = predictions$prediction.score.neuronal.progenitor, 
+                   col.name = "PS_neuronal_progenitor")
+iDA <- AddMetaData(object = iDA, metadata = predictions$prediction.score.neuroblasts, 
+                   col.name = "PS_neuroblasts")
+iDA <- AddMetaData(object = iDA, 
+                   metadata = predictions$prediction.score.max, 
+                   col.name = "Max_Prediction_Score")
+
+#iDA <- AddMetaData(object = iDA, metadata = predictions$prediction.score.radial.glia, col.name = "Score_radial_glia")
+
+rm(tranf_anchors, predictions)
+
+```
+
++ Project our dataset into the PCs of the hEM.
+
+```{r projec}
+
+# Cell loadings from human midbrain
+hm_loads <- so_list$HumanMidbrain@reductions$pca@feature.loadings[, 1:10]
+
+# Gene expression form iPSC derived cells
+iDA_ge <- as.matrix(so_list$iPSCTimeCourse@assays$RNA@data)
+iDA_ge <- iDA_ge[rownames(hm_loads), ]
+
+# New Projected PCA for iPSC data
+ipsc_projected <- scale(t(iDA_ge), center = TRUE, scale = TRUE) %*% hm_loads
+
+# Data to plot projection into hm 
+hm_pcs <- data.frame(so_list$HumanMidbrain@reductions$pca@cell.embeddings,
+                             so_list$HumanMidbrain@meta.data)
+iDA_pc_proj <- data.frame(ipsc_projected, so_list$iPSCTimeCourse@meta.data)
+
+rm(hm_loads, iDA_ge, ipsc_projected)
+
+```
+
+## Cell type assignment
+
+```{r celltype}
+
+# Assign cell clusters to cell types
+cell_type <- as.character(iDA$seurat_clusters)
+cell_type[which(cell_type == 0)] <- "DA"
+cell_type[which(cell_type == 1)] <- "NB_DA"
+cell_type[which(cell_type == 2)] <- "ProgProlif1"
+cell_type[which(cell_type == 3)] <- "ProgProlif2"
+cell_type[which(cell_type == 4)] <- "Prog1"
+cell_type[which(cell_type == 5)] <- "Prog2"
+cell_type[which(cell_type == 6)] <- "Astro"
+
+cell_type <- factor(x = cell_type, 
+                    levels = c("Prog1", "Prog2", 
+                               "ProgProlif1", "ProgProlif2",
+                               "NB_DA", "DA", "Astro"))
+
+iDA <- AddMetaData(object = iDA, metadata = cell_type, col.name = "Cell_type")
+rm(cell_type)
+
+```
+
+## Differential expression D45 and D65 in DA neurons
+
+```{r}
+
+Idents(iDA) <- iDA$Cell_type
+
+# Focus on DA neuronal cluster
+iDA_DA <- subset(iDA, cells = colnames(iDA)[which(iDA$Cell_type == "DA")])
+
+# DA cells per time point
+# D30 D45 D65 
+#  59  39  62 
+
+# Comparison between later differentiation time points (D65 vs D45).
+Idents(iDA_DA) <- iDA_DA$Day
+DEA_DA_Day65_Day45 <- FindMarkers(object = iDA_DA, ident.1 = "D65", ident.2 = "D45",
+                                  logfc.threshold = 0.25, test.use = "wilcox")
+DEA_DA_Day65_Day45 <- DEA_DA_Day65_Day45[which(DEA_DA_Day65_Day45$p_val_adj < cut_adjp), ]
+DEA_DA_Day65_Day45 <- data.frame(DEA_DA_Day65_Day45, Gene_Name = gene_info$Gene_Name[match(x = rownames(DEA_DA_Day65_Day45), table = gene_info$Gene_ID)])
+
+```
+
+## Code for figures
+
+```{r obj4plots}
+
+# Number of DEGs by Clone and Day for Fig. S3A
+nDEG <- rbind(nDEG_Clone, nDEG_Day)
+
+# Updated pheno data for Figs # Add UMAP dims
+pheno <- data.frame(iDA@meta.data, iDA@reductions$umap@cell.embeddings[, 1:2])
+
+# Gene markers of gene clusters
+DEGs_Cluster <- list(rownames(DEA_c0), rownames(DEA_c1), rownames(DEA_c2),
+                     rownames(DEA_c3), rownames(DEA_c4), rownames(DEA_c5), 
+                     rownames(DEA_c6))
+
+# Overlap cluster markers and gene markers
+ov_gm_DEGclust <- gm[gm$Gene_ID %in% unique(unlist(DEGs_Cluster)), ]
+
+```
+
+```{r OVClusterMarkers}
+
+# Overlap between gene markers
+#ov <- matrix(NA, nrow = length(DEGs_Cluster), ncol = length(DEGs_Cluster), 
+#             dimnames = list(paste("Cluster", seq(0, length(DEGs_Cluster)-1), sep = "_"),
+#                             paste("Cluster", seq(0, length(DEGs_Cluster)-1), sep = "_")))
+
+#for(i in c(1:length(DEGs_Cluster))){
+#  ci <- DEGs_Cluster[[i]]
+#  for(j in c(1:length(DEGs_Cluster))){
+#    cj <- DEGs_Cluster[[j]]
+#    ov[i, j] <- length(intersect(ci, cj)) / length(union(ci, cj))
+#  }
+#}
+
+#ov_anot <- data.frame(Cluster = paste("Cluster", seq(0, length(DEGs_Cluster)-1), sep = "_"),
+#                      row.names = paste("Cluster", seq(0, length(DEGs_Cluster)-1), sep = "_"))
+
+#ov_pal <- unlist(as.list(met.brewer(name = "Signac", n = length(DEGs_Cluster))))
+#ov_anot_col <- list(Cluster = c("Cluster_0" = ov_pal[1],
+#                                "Cluster_1" = ov_pal[2],
+#                                "Cluster_2" = ov_pal[3],
+#                                "Cluster_3" = ov_pal[4],
+#                                "Cluster_4" = ov_pal[5],
+#                                "Cluster_5" = ov_pal[6],
+#                                "Cluster_6" = ov_pal[7]))
+
+#pheatmap(ov, color = colorRampPalette(brewer.pal(n = 7, name = "Greys"))(100),
+#         annotation_colors = ov_anot_col, 
+#         annotation_col = ov_anot, 
+#         annotation_row = ov_anot, 
+#         treeheight_row = 15, 
+#         treeheight_col = 15, 
+#         border_color = "white", 
+#         display_numbers = TRUE, 
+#         number_format = "%.2f", 
+#         show_colnames = FALSE, 
+#         show_rownames = FALSE, 
+#         annotation_legend = FALSE)
+
+```
+
+```{r Fig3}
+
+# For cell type annotation of clusters
+cls <- aggregate.data.frame(x = pheno[c("UMAP_1", "UMAP_2")], 
+                            by = list(pheno$Cell_type), 
+                            FUN = median)
+
+# UMAP coloured by cluster
+Fig3a <- ggplot(data = pheno, mapping = aes(x = UMAP_1, y = UMAP_2, color = seurat_clusters)) +
+  geom_point(size = .3) + 
+  scale_color_met_d(name = "Signac") + 
+  theme_cowplot() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  ggtitle(label = "") + 
+  xlab(label = "UMAP 1") + 
+  ylab(label = "UMAP 2") + 
+  guides(colour = guide_legend(override.aes = list(size = 2))) 
+Fig3a <- Fig3a + annotate("text", x = cls$UMAP_1, y = cls$UMAP_2, label = cls$Group.1)
+
+
+# UMAP coloured by Day
+Fig3b <- ggplot(data = pheno, mapping = aes(x = UMAP_1, y = UMAP_2, color = Day)) + 
+  geom_point(size = .3) +  
+  scale_color_startrek() + 
+  theme_cowplot() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  ggtitle(label = "") + 
+  xlab(label = "UMAP 1") + 
+  ylab(label = "UMAP 2") + 
+  guides(colour = guide_legend(override.aes = list(size = 2), nrow = 2, byrow = TRUE))
+
+# Cells per cluster coloured by Day
+Fig3c <- ggplot(data = pheno, mapping = aes(x = seurat_clusters, fill = Day)) + 
+  geom_bar() + 
+  theme_cowplot() +
+  scale_fill_startrek() + 
+  xlab("Cluster") + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_text(size = 8), 
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  guides(fill = guide_legend(nrow = 2, byrow = TRUE))
+
+
+# Overlapping gene makers with cell types
+Fig3d <- DotPlot(iDA, features = ov_gm_DEGclust$Gene_ID, cluster.idents = TRUE) 
+Fig3d$data$features.plot <- factor(gene_info$Gene_Name[match(x = Fig3d$data$features.plot, 
+                                                             table = gene_info$Gene_ID)],
+                                   levels = ov_gm_DEGclust$Gene_Name)
+Fig3d <- Fig3d + theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1, size = 8),
+                       legend.text = element_text(size = 8),
+                       legend.position = "top",
+                       legend.justification = "center",
+                       legend.direction = "horizontal")
+
+
+# PC1 in human midbrain 
+Fig3e <- ggplot(data = hm_pcs, mapping = aes(x = PC_1, y = cell_type, fill = cell_type)) + 
+  geom_violin() + 
+  theme_cowplot() + 
+  scale_fill_jco() + 
+  xlim(-25, 35) + 
+  xlab(label = "PC 1") +
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_text(size = 10),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +  
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  guides(fill = guide_legend(nrow = 2, byrow = TRUE))
+  
+# Projection into PC1 grouped by day
+Fig3f <- ggplot(data = iDA_pc_proj, mapping = aes(x = PC_1, y = Day, fill = Day)) + 
+  geom_violin() + 
+  theme_cowplot() + 
+  scale_fill_startrek() + 
+  xlim(-25, 35) + 
+  xlab(label = "PC 1") +
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_text(size = 10),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) + 
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  guides(fill = guide_legend(nrow = 2, byrow = TRUE))
+
+# Projection into PC1 grouped by seurat clusters
+Fig3g <- ggplot(data = iDA_pc_proj, mapping = aes(x = PC_1, y = seurat_clusters, fill = seurat_clusters)) + 
+  geom_violin() + 
+  theme_cowplot() + 
+  scale_fill_met_d(name = "Signac") + 
+  xlim(-25, 35) + 
+  xlab(label = "PC 1") +
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_text(size = 10),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  geom_vline(xintercept = 0, linetype = "dashed")
+
+```
+
+```{r FigS3}
+
+# A) Number of differentially expressed genes by Clone and Day
+FigS3a <- ggplot(data = nDEG, mapping = aes(x = Comparison, y = DEG, fill = Comparison)) + 
+  geom_col() + 
+  scale_fill_manual(values = c(colorRampPalette(colors = pal_tron()(2))(1), 
+                               colorRampPalette(colors = pal_startrek()(4))(10)[c(3, 6, 9)])) + 
+  theme_cowplot() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) + 
+  ylab(label = "DEGs") + 
+  geom_text(aes(label = DEG)) + 
+  guides(fill = guide_legend(override.aes = list(size = .5), ncol = 2))
+
+# B) UMAP coloured by Clone
+FigS3b <- ggplot(data = pheno, mapping = aes(x = UMAP_1, y = UMAP_2, color = Clone)) + 
+  geom_point(size = .3) + 
+  theme_cowplot() + 
+  scale_color_tron() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  ggtitle(label = "") + 
+  xlab(label = "UMAP 1") + 
+  ylab(label = "UMAP 2") + 
+  guides(colour = guide_legend(override.aes = list(size = 2)))
+
+# C) Number of cells per Cluster coloured by Clone
+FigS3c <- ggplot(data = pheno, mapping = aes(x = seurat_clusters, fill = Clone)) + 
+  geom_bar() + 
+  theme_cowplot() +
+  theme(axis.title = element_text(size = 10),
+        legend.text = element_text(size = 8),
+        legend.title = element_blank(),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal") + 
+  ylab("Number of cells") + 
+  xlab(label = "Cluster") + 
+  scale_fill_tron() + 
+  guides(fill = guide_legend(override.aes = list(size = .5)))
+
+# D) Number of differentially expressed genes by Cluster
+FigS3d <- ggplot(data = nDEG_Cluster, mapping = aes(x = Cluster, y = DEG, fill = Cluster)) + 
+  geom_col() + 
+  scale_fill_met_d(name = "Signac") + 
+  theme_cowplot() +
+  theme(axis.title = element_text(size = 10),
+        legend.text = element_text(size = 8),
+        legend.title = element_blank(),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal") + 
+  ylab("DEGs by Cluster") + 
+  geom_text(aes(label = DEG)) +
+  guides(fill = guide_legend(override.aes = list(size = .5), ncol = 4))
+
+# E) Top genes per cluster 
+FigS3e <- DotPlot(iDA, features = DEGs_Cluster_top, cluster.idents = TRUE) +
+  theme(axis.title = element_text(size = 10), 
+        axis.text.y = element_text(size = 6, hjust = 1, vjust = .5), 
+        legend.title = element_blank(), 
+        legend.position = "top", 
+        legend.direction = "horizontal", 
+        legend.box = "vertical") +
+  coord_flip()
+FigS3e$data$features.plot <- factor(gene_info$Gene_Name[match(x = DEGs_Cluster_top, table = gene_info$Gene_ID)], 
+                                    levels = rev(gene_info$Gene_Name[match(x = DEGs_Cluster_top, table = gene_info$Gene_ID)]))
+
+# F) Large list of known gene markers
+FigS3f <- DotPlot(iDA, features = gm$Gene_ID, cluster.idents = TRUE) +
+  theme(axis.title = element_text(size = 10), 
+        axis.text.y = element_text(size = 6, hjust = 1, vjust = .5), 
+        legend.title = element_blank(), 
+        legend.position = "top", 
+        legend.direction = "horizontal", 
+        legend.box = "vertical") +
+  coord_flip()
+FigS3f$data$features.plot <- factor(gm$Gene_Name, levels = rev(gm$Gene_Name))
+
+```
+
+```{r FigSY}
+# Comparison between D45 and D65.
+
+# Dotplot 
+#FigSY_a <- ggplot(data = DEA_Day65_Day45, mapping = aes(x = avg_log2FC, y = -log10(p_val_adj), label = Gene_Name)) + 
+#  geom_point() + 
+#  geom_text_repel() + theme_cowplot() +
+#  theme(axis.text = element_text(size = 8),
+#        legend.text = element_text(size = 8))
+
+
+#FigSY_b <- DotPlot(iDA, features = rownames(DEA_Day65_Day45), cluster.idents = TRUE) 
+#FigSY_b$data$features.plot <- factor(gene_info$Gene_Name[match(x = FigSY_b$data$features.plot,
+#                                                               table = gene_info$Gene_ID)])
+#FigSY_b <- FigSY_b + theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1, size = 8),
+#                       legend.text = element_text(size = 8),
+#                       legend.position = "top",
+#                       legend.justification = "center",
+#                       legend.direction = "horizontal")
+
+## Comparison in just DA neurons.
+#FigSY_DA_a <- ggplot(data = DEA_DA_Day65_Day45, mapping = aes(x = avg_log2FC, y = -log10(p_val_adj), label = Gene_Name)) + 
+#  geom_point() + 
+#  geom_text_repel() + theme_cowplot() +
+#  theme(axis.text = element_text(size = 8),
+#        legend.text = element_text(size = 8))
+
+
+#FigSY_DA_b <- DotPlot(iDA_DA, features = rownames(DEA_DA_Day65_Day45), cluster.idents = FALSE) 
+#FigSY_DA_b$data$features.plot <- factor(gene_info$Gene_Name[match(x = FigSY_DA_b$data$features.plot,
+#                                                               table = gene_info$Gene_ID)])
+#FigSY_DA_b <- FigSY_DA_b + theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1, size = 8),
+#                       legend.text = element_text(size = 8),
+#                       legend.position = "top",
+#                       legend.justification = c(1, 4),
+#                       legend.direction = "horizontal", 
+#                       legend.box = "vertical") + coord_flip()
+
+#FigSY_DA_c <- VlnPlot(iDA_DA, features = rownames(DEA_DA_Day65_Day45), stack = TRUE ,flip = TRUE, group.by = "Clone", split.by = "Day")
+#FigSY_DA_c$data$feature <- factor(gene_info$Gene_Name[match(x = FigSY_DA_c$data$feature,
+#                                                               table = gene_info$Gene_ID)])
+
+```
+
+```{r FigSX1}
+
+# Optional plots Supplementary Figure X1.
+
+# UMAP coloured by predicted cell type from the human midbrain
+FigSXa <- ggplot(data = pheno, mapping = aes(x = UMAP_1, y = UMAP_2, color = Predicted)) +
+  geom_point(size = .3) + 
+  scale_color_uchicago() + 
+  theme_cowplot() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  ggtitle(label = "") + 
+  xlab(label = "UMAP 1") + 
+  ylab(label = "UMAP 2") + 
+  guides(colour = guide_legend(override.aes = list(size = 2)))
+
+# UMAP showing the maximum prediction score for the human midbrain as reference
+FigSXb <- ggplot(data = pheno, mapping = aes(x = UMAP_1, y = UMAP_2, color = Max_Prediction_Score)) +
+  scale_color_material("deep-purple") + 
+  geom_point(size = .3) + 
+  theme_cowplot() + 
+  theme(axis.title = element_text(size = 10),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  ggtitle(label = "") + 
+  xlab(label = "UMAP 1") + 
+  ylab(label = "UMAP 2") 
+
+
+```
+
+```{r FigS3pdf}
+
+#pdf(file = "./Figures/Fig3S.pdf", width = 7, height = 9)
+#plot_grid(plot_grid(FigS3a, FigS3b, FigS3c, FigS3d, 
+#                    rel_heights = c(1.1, 1, .9, 1.1), 
+#                    ncol = 1, align = "hv", axis = "rtbl", 
+#                    labels = c("A", "B", "C", "D")), 
+#          FigS3e,
+#          FigS3f, ncol = 3, labels = c("", "E", "F"))
+#dev.off()
+
+```
+
+```{r Fig3pdf}
+
+pdf(file = "./Figures/Fig3_draft.pdf", width = 7, height = 9)
+plot_grid(plot_grid(Fig3a, Fig3b, Fig3c, ncol = 3, 
+                    align = "h", axis = "bt", 
+                    labels = c("A", "B", "C")),
+          Fig3d,
+          plot_grid(Fig3e, Fig3f, Fig3g, ncol = 3, 
+                    align = "h", axis = "bt", 
+                    labels = c("E", "F", "G")),
+          ncol = 1, labels = c("", "D", ""), rel_heights = c(1, 1.1, 1))
+dev.off()
+
+
+
+```
+
+```{r FigSX1pdf}
+
+#pdf(file = "./Figures/FigSX.pdf", width = 7, height = 4)
+#plot_grid(FigSXa, FigSXb, ncol = 2, labels = c("A", "B"))
+#dev.off()
+
+
+```
+
+```{r OptionalFigs}
+
+#FeaturePlot(object = iDA,
+#            features = gene_info$Gene_ID[match(x = c("SYT1", "DCX", "TH"), 
+#                                               table = gene_info$Gene_Name)])
+
+
+# Dot plot some features #
+#FeaturePlot(object = iDA, 
+#            features = gene_info$Gene_ID[match(x = "FOXA2",table = gene_info$Gene_Name)])
+
+
+#be <- c("PBX1")
+
+#DAm <- c("TH", "DDC", "SLC6A3", "SLC18A2", "DRD2", "LMX1A", "LMX1B", "FOXA2", "NR4A2", "PITX3", "EN1", "EN2", "CNPY1", "PBX1", "GAD1", "GAD2")
+
+#DAm <- c("TH", "NR4A2", "LMX1A", "LMX1B", "DDC", "KCNJ6", "PBX1", "LMO3", "CALB1", "SLC18A2", "TPH1", "SLC18A1", "SNAP25", 
+#         "MAP2", "SYT1", "DCX", "VIM", "CORIN", "HES1", "NFIA", "RFX4", "SLC1A3", "SLIT2", "OTX2", "SOX6", "AGTR1", "ALDH1A1")
+
+#prolif_markers <- c("MKI67", "TOP2A", "KIAA1524")
+#prolif <- gene_info$Gene_ID[match(x = prolif_markers, table = gene_info$Gene_Name)]
+#prolif <- prolif[prolif %in% rownames(iDA)]
+
+#dp_prolif <- DotPlot(iDA, features = prolif, cluster.idents = TRUE) + coord_flip()
+#dp_prolif$data$features.plot <- factor(gene_info$Gene_Name[match(x = dp_prolif$data$features.plot, table = gene_info$Gene_ID)], 
+#                                levels = prolif_markers)
+
+
+# Heatmap of top markers
+
+# FigS3f <- DoHeatmap(object = iDA, features = DEGs_Cluster_top, group.by = "seurat_clusters", combine = FALSE)
+# FigS3f <- FigS3f[[1]]
+# FigS3f$data$Feature <- factor(gene_info$Gene_Name[match(FigS3f$data$Feature, gene_info$Gene_ID)],
+# levels = rev(gene_info$Gene_Name[match(DEGs_Cluster_top, gene_info$Gene_ID)]))
+
+
+# DEGs by Clone (obtained per cluster)
+
+# DEGs_Clone <- unique(c(rownames(DEA_Clone_c0), rownames(DEA_Clone_c1), rownames(DEA_Clone_c2),
+#                       rownames(DEA_Clone_c3), rownames(DEA_Clone_c4), rownames(DEA_Clone_c5),
+#                       rownames(DEA_Clone_c6)))
+# pfx <- DoHeatmap(object = iDA, features = DEGs_Clone, group.by = "Clone", group.colors = pal_tron()(2), angle = 0)
+# pfx$data$Feature <- gene_info$Gene_Name[match(pfx$data$Feature, gene_info$Gene_ID)] 
+# pfx 
+
+# D) Number of differentially expressed genes by Clone per Cluster
+#Fxd <- ggplot(data = nDEG_Clone, mapping = aes(x = Cluster, y = DEG, fill = Cluster)) + 
+#  geom_col() + 
+#  scale_fill_met_d(name = "Signac") + 
+#  theme_cowplot() +
+#  theme(legend.position = "top", 
+#        legend.justification = "center", 
+#        legend.direction = "horizontal", 
+#        legend.title = element_blank(), 
+#        legend.text = element_text(size = 8)) + 
+#  ylab("DEGs by Clone") + 
+#  geom_text(aes(label = DEG)) + 
+#  guides(fill = guide_legend(override.aes = list(size = 4)))
+
+```
+
+```{r}
+
+saveRDS(object = iDA, "./TimeCourse/TimeCourse_SeuratObject.rds")
+
+saveRDS(object = DEA_Day30_Day21, "./TimeCourse/TimeCourse_DEA_Day30_Day21.rds")
+saveRDS(object = DEA_Day45_Day30, "./TimeCourse/TimeCourse_DEA_Day45_Day30.rds")
+saveRDS(object = DEA_Day65_Day45, "./TimeCourse/TimeCourse_DEA_Day65_Day45.rds")
+
+saveRDS(object = DEA_Clone, "./TimeCourse/TimeCourse_DEA_Clone.rds")
+
+saveRDS(object = DEA_c0, "./TimeCourse/TimeCourse_DEA_c0.rds")
+saveRDS(object = DEA_c1, "./TimeCourse/TimeCourse_DEA_c1.rds")
+saveRDS(object = DEA_c2, "./TimeCourse/TimeCourse_DEA_c0.rds")
+saveRDS(object = DEA_c3, "./TimeCourse/TimeCourse_DEA_c0.rds")
+saveRDS(object = DEA_c4, "./TimeCourse/TimeCourse_DEA_c0.rds")
+saveRDS(object = DEA_c5, "./TimeCourse/TimeCourse_DEA_c0.rds")
+saveRDS(object = DEA_c6, "./TimeCourse/TimeCourse_DEA_c0.rds")
+
+saveRDS(object = DEGs_Cluster, "./TimeCourse/TimeCourse_DEGs_Cluster.rds")
+saveRDS(object = iDA_pc_proj, "./TimeCourse/TimeCourse_iPSCprojection_hEM.rds")
+saveRDS(object = hm_pcs, "./TimeCourse/TimeCourse_hEM_PCloadings.rds")
+
+
+saveRDS(object = Fig3a, "./Figures/Fig3a.rds")
+saveRDS(object = Fig3b, "./Figures/Fig3b.rds")
+saveRDS(object = Fig3c, "./Figures/Fig3c.rds")
+saveRDS(object = Fig3d, "./Figures/Fig3d.rds")
+saveRDS(object = Fig3e, "./Figures/Fig3e.rds")
+saveRDS(object = Fig3f, "./Figures/Fig3f.rds")
+saveRDS(object = Fig3g, "./Figures/Fig3g.rds")
+
+
+saveRDS(object = FigS3a, "./Figures/FigS3a.rds")
+saveRDS(object = FigS3b, "./Figures/FigS3b.rds")
+saveRDS(object = FigS3c, "./Figures/FigS3c.rds")
+saveRDS(object = FigS3d, "./Figures/FigS3d.rds")
+saveRDS(object = FigS3e, "./Figures/FigS3e.rds")
+saveRDS(object = FigS3f, "./Figures/FigS3f.rds")
+
+saveRDS(object = FigSXa, "./Figures/FigSXa.rds")
+saveRDS(object = FigSXb, "./Figures/FigSXa.rds")
+
+```
+
+
