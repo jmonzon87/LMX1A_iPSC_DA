@@ -13,11 +13,17 @@ Time Course data
   
 + Count data per sample
   [GSM7897844_HET1D21_S2_genematrix.csv.gz](https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7897nnn/GSM7897844/suppl/GSM7897844%5FHET1D21%5FS2%5Fgenematrix.csv.gz)
+  
   [GSM7897845_HET2D21_S1_genematrix.csv.gz](https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7897nnn/GSM7897845/suppl/GSM7897845%5FHET2D21%5FS1%5Fgenematrix.csv.gz)
+
   [GSM7897846_HET1D30_S5_genematrix.csv.gz](https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7897nnn/GSM7897846/suppl/GSM7897846%5FHET1D30%5FS5%5Fgenematrix.csv.gz)
+
   [GSM7897847_HET2D30_S6_genematrix.csv.gz](https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7897nnn/GSM7897847/suppl/GSM7897847%5FHET2D30%5FS6%5Fgenematrix.csv.gz)
+
   [GSM7897849_HET1D45WHOLE_S7_genematrix.csv.gz](https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7897nnn/GSM7897849/suppl/GSM7897849%5FHET1D45WHOLE%5FS7%5Fgenematrix.csv.gz)
+
   [GSM7897850_HET1D65_S9_genematrix.csv.gz](https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7897nnn/GSM7897850/suppl/GSM7897850%5FHET1D65%5FS9%5Fgenematrix.csv.gz)
+
   [GSM7897851_HET2D65_S10_genematrix.csv.gz](https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7897nnn/GSM7897851/suppl/GSM7897851%5FHET2D65%5FS10%5Fgenematrix.csv.gz)
   
 + Normalized data: [GSE247600_TimeCourse_normalized_data.tsv.gz](https://ftp.ncbi.nlm.nih.gov/geo/series/GSE247nnn/GSE247600/suppl/GSE247600%5FTimeCourse%5Fnormalized%5Fdata.tsv.gz)
