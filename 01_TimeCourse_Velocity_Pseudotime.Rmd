@@ -1,0 +1,273 @@
+---
+title: "iPSC-DA time course: RNA velocity"
+author: "J Monzón Sandoval"
+date: 'Last update: `r date()`'
+output: 
+  html_document:
+    theme: lumen
+    toc: yes
+    number_sections: true
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+---
+
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE)
+
+library(Seurat)
+library(scater)
+library(scran)
+library(velociraptor)
+
+library(stringr)
+
+library(ggplot2)
+library(cowplot)
+library(MetBrewer)
+library(ggsci)
+
+```
+
+```{r}
+# Gene expression data including introns
+
+## All data matrices
+#fn <- list.files(path = "./05_MappaAnalyzer_BFP", 
+#                 pattern = "_genematrix.csv", 
+#                 recursive = TRUE, full.names = TRUE)
+#fn <- fn[str_detect(string = fn, pattern = "_incl_introns_", 
+#                    negate = FALSE)] #FALSE to include introns
+### Need to combine counts from the different samples
+#t1 <- read.table(file = fn[1], sep = ",", header = TRUE, row.names = 1)
+
+#for (i in c(2:length(fn))){
+#  ti <- read.table(file = fn[i], sep = ",", header = TRUE, row.names = 1)
+#  t1 <- cbind(t1, ti)
+#}
+
+#ged_intron <- t1
+#rm(i, t1, ti, fn)
+
+#ged_intron <- as.matrix(ged_intron)
+
+#ged_exon <- readRDS("./TimeCourse/TimeCourse_SeuratObject.rds")
+
+# Reduce gene expression including introns to the filtered data of the timecourse. 
+#ged_intron <- ged_intron[rownames(ged_exon), colnames(ged_exon)]
+
+#saveRDS(ged_intron, file = "./TimeCourse/TimeCourse_Counts_InclIntrons.rds")
+
+```
+
+## Calculate exon and intron matrices.
+
+```{r}
+
+# Exon counts
+iDA <- readRDS("./TimeCourse/TimeCourse_SeuratObject.rds") # Seurat object
+
+# Intron counts 
+exon_counts <- as.matrix(iDA@assays$RNA@counts)
+all_counts <- readRDS(file = "./TimeCourse/TimeCourse_Counts_InclIntrons.rds") # matrix
+intron_counts <- all_counts - exon_counts
+
+```
+
+## Intron vs Exon counts
+
+```{r fig.height=3.5, fig.width=7}
+
+# Overview number of exon / intron counts
+d2p <- data.frame(Exon = colSums(exon_counts), 
+                  Intron = colSums(intron_counts),
+                  All = colSums(exon_counts) + colSums(intron_counts))
+d2p <- data.frame(cell = rownames(d2p),
+                  d2p, 
+                  Exon_percent = d2p$Exon/d2p$All * 100, 
+                  Intron_percent = d2p$Intron/d2p$All * 100)
+
+# Plot number of Exon vs Intron counts (log10 transformed)
+g1 <- ggplot(data = d2p, mapping = aes(x = log10(Exon), y = log10(Intron))) + 
+  geom_point() + 
+  theme_cowplot() +
+  theme(axis.title = element_text(size = 10)) +
+  geom_abline(slope = 1, intercept = 0)
+
+# Barplot percent of Exon and Intron counts
+d2p2 <- reshape2::melt(d2p[, c("cell", "Exon_percent", "Intron_percent")])
+
+g2 <- ggplot(data = d2p2, mapping = aes(x = cell, y = value, color = variable, fill = variable)) + 
+  geom_col() + theme_cowplot() +
+  theme(axis.title = element_text(size = 10),
+        legend.text = element_text(size = 8),
+        axis.text.x =  element_blank(),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank())
+
+plot_grid(g1, g2)
+rm(d2p, d2p2, g1, g2)
+
+
+```
+
+## Remove astrocyte population C6
+
+```{r}
+
+# remove Astrocyte C6 population from the analysis
+iDA <- subset(iDA, idents = c("C0", "C1", "C2", "C3", "C4", "C5"))
+exon_counts <- exon_counts[, colnames(iDA)]
+all_counts <- all_counts[, colnames(iDA)]
+intron_counts <- intron_counts[, colnames(iDA)]
+
+```
+
+## Include cell and gene annotations
+
+```{r}
+
+# Metadata
+pheno <- iDA@meta.data
+gene_info <- read.table("./gene_info.csv", 
+                        sep = ",", header = TRUE, stringsAsFactors = FALSE)
+gene_anot <- gene_info
+rownames(gene_anot) <- gene_anot$Gene_ID
+gene_anot <- gene_anot[rownames(iDA), ]
+
+```
+
+## Normalize, select top variable features and estimate RNA velocity
+
+```{r}
+
+# Single cell experiment
+sce <- SingleCellExperiment(assays = list(spliced = exon_counts,  
+                                          unspliced = intron_counts), 
+                            colData = pheno,
+                            rowData = gene_anot)
+
+# Log normalize "spliced" counts 
+sce <- scuttle::logNormCounts(sce,  assay.type = 1)
+
+dec <- scran::modelGeneVar(sce)
+top_hvg <- scran::getTopHVGs(dec, n = 5000)
+
+# Calculate velocity 
+velocity <- scvelo(sce, 
+                   #use.theirs = TRUE, 
+                   subset.row = top_hvg, 
+                   assay.X = "spliced")
+```
+
+## Project RNA velocity onto UMAP embedding 
+
+```{r}
+
+# Add to single cell experiment
+sce$velocity_pseudotime <- velocity$velocity_pseudotime
+sce$root_cells <- velocity$root_cells
+sce$end_points <- velocity$end_points
+sce$velocity_confidence <- velocity$velocity_confidence
+sce$velocity_length <- velocity$velocity_length
+sce$velocity_confidence_transition <- velocity$velocity_confidence_transition
+
+# Visualize in UMAP # Embeded in  previous projection
+reducedDim(sce, "UMAP") <- iDA@reductions$umap@cell.embeddings[, 1:2]
+
+
+# UMAP to embed velocity
+embedded <- embedVelocity(reducedDim(sce, "UMAP"), velocity)
+grid.df <- gridVectors(reducedDim(sce, "UMAP"), embedded)
+
+```
+
+## Code for figures
+
+```{r}
+
+Fig4i <- plotUMAP(sce, colour_by = "velocity_pseudotime") + 
+  geom_segment(data = grid.df, 
+                 mapping = aes(x = start.UMAP_1, y = start.UMAP_2,
+                               xend = end.UMAP_1, yend = end.UMAP_2), 
+                 arrow = arrow(length = unit(0.12, "cm")), color = "black") + 
+  theme_cowplot() +
+  theme(aspect.ratio = 1, 
+        axis.title = element_text(size = 10),
+        legend.text = element_text(size = 8),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank())  + 
+  scale_colour_met_c(name = "Hiroshige") # 
+
+d2p <- as.data.frame(colData(sce))
+
+Fig4j <- ggplot(d2p, aes(x = velocity_pseudotime, color = Day, fill = Day)) + 
+  geom_density() + 
+  scale_fill_startrek(alpha = 0.2) +
+  scale_color_startrek(alpha = 1) + 
+  theme_cowplot() +  
+  theme(axis.title = element_text(size = 10),
+        legend.text = element_text(size = 8),
+        axis.text = element_text(size = 8),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  xlab("Velocity pseudotime") +
+  guides(colour = guide_legend(override.aes = list(size = 2), nrow = 2))
+
+
+sc_pal <- unlist(as.list(met.brewer(name = "Signac", n = length(levels(sce$seurat_clusters)))))
+sc_pala1 <- alpha(sc_pal, alpha = 0.2) 
+
+Fig4k <- ggplot(d2p, aes(x = velocity_pseudotime, color = seurat_clusters, fill = seurat_clusters)) + 
+  geom_density() + 
+  scale_fill_manual(values = sc_pala1) +
+  scale_color_manual(values = sc_pal) + 
+  theme_cowplot() +  
+  theme(axis.title = element_text(size = 10),
+        legend.text = element_text(size = 8),
+        axis.text = element_text(size = 8),
+        legend.key.size = unit(x = .3, units = "cm"),
+        legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.spacing.x = unit(.5, "mm"),
+        legend.spacing.y = unit(2, "mm"),
+        legend.position = "top", 
+        legend.justification = "center", 
+        legend.direction = "horizontal", 
+        legend.title = element_blank()) +
+  xlab("Velocity pseudotime") + 
+  guides(colour = guide_legend(override.aes = list(size = 2), nrow = 2))
+
+```
+
+
+```{r}
+
+pdf("./Figures/Fig4_ijk.pdf", width = 7, height = 4)
+plot_grid(Fig4a, plot_grid(Fig4b, Fig4c, 
+                           ncol = 1, 
+                           labels = c("J", "K"), 
+                           align = "h", axis = "lr"), 
+          labels = c("I", ""), 
+          ncol = 2)
+dev.off()
+
+saveRDS(object = Fig4a, "./Figures/Fig4i.rds")
+saveRDS(object = Fig4b, "./Figures/Fig4j.rds")
+saveRDS(object = Fig4c, "./Figures/Fig4k.rds")
+
+```
+
