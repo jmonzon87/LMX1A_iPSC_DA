@@ -1,15 +1,13 @@
 # LMX1A_iPSC_DA
 A repository of RMarkdown files used to analyze sc-RNA sequencing data from induced Pluripotent Stem Cell derived dopaminergic neurons of the LMX1A Cre AAVS1 BFP line.
 
-Data availability
-Raw and processed gene expression data has been deposited in GEO:
+## Data availability
 
+Raw and processed gene expression data has been deposited in GEO:
 + Time Course experiment [GSE247600](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE247600)..
 
-To start
-Download gene expression data and metadata.
+### Time course
 
-Time Course data
 + Metadata: [GSE247600_TimeCourse_metadata.tsv.gz](https://ftp.ncbi.nlm.nih.gov/geo/series/GSE247nnn/GSE247600/suppl/GSE247600%5FTimeCourse%5Fmetadata.tsv.gz)
   
 + Count data per sample
@@ -33,9 +31,19 @@ Time Course data
 External data used as reference to annotate clusters (human embryonic midbrain / hEM)
 + Data obtained from GEO [GSE76381](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE76381).
 
-RMarkdown files
-00_TimeCourse_DataFiltering_DEA.Rmd Filtering, normalization, scaling, clustering, annotation using the hEM as reference, PCA, UMAP, differential expression analysis per time point and per clone.
-01_TimeCourse_Velocity_Pseudotime.Rmd RNA velocity analysis and projection into UMAP. Note you will need to download the genematrix files including introns from GEO.
+# To start
+Download gene expression data and metadata.
 
-License
+# RMarkdown scripts
+
++ *00_TimeCourse_DataFiltering_DEA.Rmd*
+  Time course data filtering, normalization, scaling, clustering, annotation using the hEM as reference, PCA, UMAP, differential expression analysis per time point and per clone.
++ *01_TimeCourse_Velocity_Pseudotime.Rmd*
+  RNA velocity analysis and projection into UMAP. Please note you will need to download the genematrix files including introns (<SAMPLE>_incl_introns_genematrix.csv.gz) from GEO.
++ *02_Sorted_MPP_DataFiltering_DEA.Rmd*
+  Non Sorted (NS), and sorted (BFP+ and BFP-) data filtering, normalization, scaling, clustering, annotation of MPP+ treated data based on the basal condition, PCA, UMAP and differential expression analysis per cluster and per sorted type.
++ *03_Sorted_MPP_vs_Basal_B3.Rmd*
+  Differential expression analysis on the B3 basal and B3 predicted MPP+ treated cells.  
+
+# License
 Distributed under the MIT License. See License.txt for more information.
