@@ -1,0 +1,108 @@
+---
+title: "iPSC-DA MPP vs basal: "
+author: "J Monzón Sandoval"
+date: 'Last update: `r date()`'
+output: 
+  html_document:
+    theme: lumen
+    toc: yes
+    number_sections: true
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(cowplot)
+library(ggplot2)
+library(ggsci)
+library(stringr)
+library(scProportionTest)
+
+```
+
+# Data input
+
+```{r}
+
+# Gene annotations 
+gene_info <- read.table(file = "./gene_info.csv", sep = ",", header = TRUE)
+
+# Sorted basal data
+iDA2 <- readRDS(file = "./MMPsorted/iDA_basal.Rds")
+
+# Sorted MPP data
+iDA3 <- readRDS(file = "./MMPsorted/iDA_MPP.Rds")
+
+# Sorted Both
+iDA4 <- readRDS(file = "./MMPsorted/iDA_both.Rds")
+
+```
+
+```{r}
+
+# Merge basal clusters and predicted basal clusters
+Basal_clusters <- iDA2$seurat_clusters
+
+Prediction_Basal <- iDA3$Predicted_Basal
+#Prediction_Basal <- paste(Prediction_Basal, "i", sep = "_")
+names(Prediction_Basal) <- names(iDA3$Predicted_Basal)
+
+bp <- c(as.character(Basal_clusters), as.character(Prediction_Basal))
+names(bp) <- c(names(Basal_clusters), names(Prediction_Basal))
+
+# Add basal clusters and predicted basal clusters (from the MPP treated condition)
+iDA4 <- AddMetaData(object = iDA4, metadata = bp, col.name = "Basal_Predicted")
+Idents(iDA4) <- iDA4$Basal_Predicted
+rm(bp)
+
+# Do the test across all clusters
+prop_test <- sc_utils(iDA4)
+
+prop_test <- permutation_test(
+	prop_test, cluster_identity = "Basal_Predicted",
+	sample_1 = "basal", sample_2 = "MPP",
+	sample_identity = "Treatment"
+)
+
+```
+
+## Theme
+
+```{r}
+
+# Theme for plots
+cool_theme <- theme(panel.background = element_blank(),
+                    panel.border = element_rect(linewidth = 1, fill = NA),
+                    strip.background = element_rect(fill = "white"),
+                    title = element_text(size = 14),
+                    axis.title = element_text(size = 12),
+                    axis.text = element_text(size = 12),
+                    legend.text = element_text(size = 12),
+                    legend.position = "top",
+                    legend.justification = "center",
+                    legend.direction = "horizontal", 
+                    legend.key = element_blank(),
+                    legend.key.size = unit(4, 'mm'))
+
+```
+
+## Plot results
+
+```{r}
+
+g1 <- permutation_plot(prop_test)
+g1$data$clusters <- factor(g1$data$clusters, 
+                           levels = c("B2", "B4", "B5", "B0", "B1", "B3"))
+
+g1 <- g1 + cool_theme
+
+pdf(file = "FigS5A.pdf", width = 4, height = 3.5)
+plot_grid(g1, labels = "A")
+dev.off()
+
+
+```
