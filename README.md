@@ -43,7 +43,9 @@ Download gene expression data and metadata.
 + *02_Sorted_MPP_DataFiltering_DEA.Rmd*
   Non Sorted (NS), and sorted (BFP+ and BFP-) data filtering, normalization, scaling, clustering, annotation of MPP+ treated data based on the basal condition, PCA, UMAP and differential expression analysis per cluster and per sorted type.
 + *03_Sorted_MPP_vs_Basal_B3.Rmd*
-  Differential expression analysis on the B3 basal and B3 predicted MPP+ treated cells.  
+  Differential expression analysis on the B3 basal and B3 predicted MPP+ treated cells.
++ *04_ProportionChange.Rmd*
+  Test cell cluster proportion differences in basal and MPP conditions. 
 
 # License
 Distributed under the MIT License. See License.txt for more information.
